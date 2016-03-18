@@ -4,9 +4,6 @@
 **/
 #include <Wire.h>
 
-#define LED_SYNC 8
-#define LED_SAMPLE 9
-
 #define ARRAY_SIZE 0xDC
 
 // State machine declarations for I2C
@@ -22,7 +19,7 @@ enum I2CState
 volatile uint8_t i2c_state = I2C_IDLE;
 
 // Command buffer for I2C ISR.
-uint8_t i2c_nextcmd[2] = { 0xDE, 0x01 };
+uint8_t i2c_nextcmd[2] = { 0xDE, 0x01 };  // Preload with command to signal Modem = OK , SMS = 1
 
 // State machine declarations for SPI
 enum SPIState
@@ -30,7 +27,6 @@ enum SPIState
   SPI_IDLE,
   SPI_COMMAND,
   SPI_COMMAND_BYTE,
-  SPI_ADRESS,
   SPI_DUMP
 };
 
@@ -44,9 +40,6 @@ volatile uint8_t datalog[ARRAY_SIZE];
 
 volatile uint8_t count = 0;
 
-// Flag for performing sample
-volatile boolean perform_sample = false;
-
 // Flag for sampling complete
 volatile boolean sample_done = false;
 
@@ -56,9 +49,9 @@ volatile boolean sync = false;
 /*
  I2C-Write from Master
 */
-void onWireReceive(int numBytes)
+static void onWireReceive(int numBytes)
 {
-  if (!sync) {
+  if (!sync) {      // If we got this far, we're in sync!
     SPDR = 0x01;
     sync = true;
   }
@@ -84,21 +77,14 @@ void onWireReceive(int numBytes)
         i2c_nextcmd[0] = 0xFF;
         break;
       }
-      if (perform_sample) {
-        datalog[count++] = Wire.read();
-        if (count < ARRAY_SIZE)
-          i2c_nextcmd[0] = count;
-        else
-        {
-          i2c_nextcmd[0] = 0xFF;
-          perform_sample = false;
-          sample_done = true;
-          SPDR = 0xFE;
-        }
-      }
-      else {
-        datalog[0] = Wire.read();    // FIX ME!!! NOT correct in this form
+      datalog[count++] = Wire.read();
+      if (count < ARRAY_SIZE)
+        i2c_nextcmd[0] = count;
+      else
+      {
         i2c_nextcmd[0] = 0xFF;
+        sample_done = true;
+        SPDR = 0xFE;
       }
       i2c_state = I2C_IDLE;
       break;
@@ -107,7 +93,7 @@ void onWireReceive(int numBytes)
       // We expect a single byte.
       if (numBytes != 1 || Wire.read() != 0xFE)
         break;
-      perform_sample = true;         // Start a new sample sequence
+      // Start a new sample sequence
       sample_done = false;
       count = 0;
       i2c_nextcmd[0] = count;
@@ -123,7 +109,7 @@ void onWireReceive(int numBytes)
 /*
  I2C-Read from Master
 */
-void onWireRequest()
+static void onWireRequest()
 {
   switch (i2c_state) {
     case I2C_REQUEST:                  // register request
@@ -179,11 +165,13 @@ ISR (SPI_STC_vect)
             spi_state = SPI_COMMAND;
             break;
 
-          case 0x03:                   // Start adress request sequence from I2C master
-            spi_state = SPI_ADRESS;
+          case 0x04:                   // Start transferring array
+            if (!sample_done)
+              break;
+            spi_state = SPI_DUMP;
             break;
 
-          case 0x04:                   // Start transferring array
+          case 0x05:                   // Start transferring array
             if (!sample_done)
               break;
             spi_state = SPI_DUMP;
@@ -202,11 +190,6 @@ ISR (SPI_STC_vect)
         spi_state = SPI_IDLE;
         break;
 
-      case SPI_ADRESS:                 // Byte of adress request
-        spi_out = datalog[spi_in];
-        spi_state = SPI_IDLE;
-        break;
-
       case SPI_DUMP:                   // Transfer whole array in sequence
         spi_out = datalog[spi_in];
         if (spi_in == 0xDB) {
@@ -222,13 +205,10 @@ ISR (SPI_STC_vect)
 
 void setup()
 {
-  // init sync LED
-  pinMode(LED_SYNC, OUTPUT);
+  // Port B0 and B1 output, sync and sample LED
+  DDRB = (1 << DDB0) | (1 << DDB1);
 
-  // init sample_done LED
-  pinMode(LED_SAMPLE, OUTPUT);
-
-  // have to send on master in, *slave out*
+  // Set MISO output
   pinMode(MISO, OUTPUT);
 
   // enable SPI in slave mode
@@ -251,9 +231,6 @@ void setup()
 
 void loop()
 {
-  // set the sync LED with the state of the variable:
-  digitalWrite(LED_SYNC, sync);
-
-  // set the sample_done LED with the state of the variable:
-  digitalWrite(LED_SAMPLE, sample_done);
+  // set the sync and sample_done LED with the state of the variable:
+  PORTB = (sync << PB0) | (sample_done << PB1);
 } // end of loop
