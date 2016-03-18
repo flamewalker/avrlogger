@@ -27,7 +27,8 @@ enum SPIState
   SPI_IDLE,
   SPI_COMMAND,
   SPI_COMMAND_BYTE,
-  SPI_DUMP
+  SPI_DUMP,
+  SPI_RECEIVE
 };
 
 volatile uint8_t spi_state = SPI_IDLE;
@@ -38,6 +39,7 @@ volatile uint8_t spi_cmd = 0xFE;
 // Pointer init, later use point to arrays for store of values
 volatile uint8_t *datalog;
 volatile uint8_t *templog;
+volatile uint8_t *sample_template;
 
 // Global dirty variables for register areas
 volatile uint8_t ARRAY_SIZE;
@@ -45,9 +47,13 @@ volatile uint8_t SETTINGS;
 volatile uint8_t SYSTIME;
 volatile uint8_t HISTORICAL;
 volatile uint8_t CURRENT;
+volatile uint8_t ALARMS;
+volatile uint8_t LAST_24H;
+volatile uint8_t STATUS;
 
-// Counter...
+// Counters...
 volatile uint8_t count = 0;
+volatile uint8_t eeprom_count = 0;
 
 // Flags for sampling complete / available for transfer
 volatile boolean sample_done = false;
@@ -56,17 +62,16 @@ volatile uint8_t sample_send = 0;
 
 // Flags for contact with CTC Ecologic EXT
 volatile boolean first_sync = false;
-volatile boolean sync = false;
+volatile boolean i2c_sync = false;
+volatile boolean spi_sync = true;
 
 /*
  I2C-Write from Master
 */
 static void onWireReceive(int numBytes)
 {
-  if (!sync) {      // If we got this far, we're in sync!
-    SPDR = 0x01;    // Preload with sync message
-    sync = true;
-  }
+  if (!i2c_sync)      // If we got this far, we're in sync!
+    i2c_sync = true;
 
   switch (i2c_state) {
     case I2C_IDLE:
@@ -90,9 +95,9 @@ static void onWireReceive(int numBytes)
         count = 0;
         break;
       }
-      templog[i2c_nextcmd[0]] = Wire.read();
-      if (++count < ARRAY_SIZE)
-        i2c_nextcmd[0] = count;
+      templog[count++] = Wire.read();  // Right about here, would be the place to insert check if sample is newer than before
+      if (count < ARRAY_SIZE)
+        i2c_nextcmd[0] = sample_template[count];
       else
       {
         i2c_nextcmd[0] = 0xFF;
@@ -110,7 +115,7 @@ static void onWireReceive(int numBytes)
       // Start a new sample sequence
       sample_done = false;
       count = 0;
-      i2c_nextcmd[0] = count;
+      i2c_nextcmd[0] = sample_template[count];
       i2c_state = I2C_REQUEST;
       break;
 
@@ -158,33 +163,46 @@ ISR (SPI_STC_vect)
   // Preload response to MASTER
   uint8_t spi_out = spi_in;
 
-  // set status report output
-  if (!sync)
-    spi_out = 0;                       // Not in sync with I2C master yet
-  else {
-    if (!new_sample_available)
-      spi_out = 1;                     // In sync with I2C master, no new sample available
+  if (!spi_sync)      // If we got this far, we're in sync!
+    spi_sync = true;
 
-    switch (spi_state) {
+  // set status report output
+  if (spi_in == 0xF0)                    // Receive sample_template from SPI Master
+  {
+    spi_state = SPI_RECEIVE;
+    eeprom_count = 0;
+  }
+  else
+  {
+    switch (spi_state)
+    {
       case SPI_IDLE:
-        switch (spi_in) {
-          case 0xFE:                   // No-op / PING to I2C master
+        if (!i2c_sync)                       // Not in sync with I2C master yet
+        {
+          spi_out = 0x00;
+          break;
+        }
+        switch (spi_in)
+        {
+          case 0xFE:                     // No-op / PING to I2C master
             break;
 
-          case 0xFF:                   // Start sample sequence from I2C master
+          case 0xFF:                    // Start sample sequence from I2C master
             //            i2c_state = I2C_SAMPLE;
             break;
 
-          case 0x02:                   // Start command sequence to I2C master
+          case 0xF1:                    // Start command sequence to I2C master
             spi_state = SPI_COMMAND;
-            spi_out = 2;
+            spi_out = 0xF1;
             break;
 
-          case 0x04:                   // Start transferring array
-            if (!new_sample_available)
+          case 0xF2:                    // Start transferring array
+            if (!new_sample_available)  // In sync with I2C master, no new sample available
+            {
+              spi_out = 0x01;
               break;
+            }
             spi_state = SPI_DUMP;
-            spi_out = 4;
             break;
         }
         break;
@@ -206,11 +224,21 @@ ISR (SPI_STC_vect)
           spi_out = sample_send;
           break;
         }
-        spi_out = datalog[spi_in];
         if (spi_in == 0xAD)           // Changed to 0xAD in ver 0.8.4, only send up to CURRENT
         {
           sample_send = 0;
           new_sample_available = false;
+          spi_state = SPI_IDLE;
+          break;
+        }
+        spi_out = datalog[spi_in];
+        break;
+
+      case SPI_RECEIVE:
+        EEPROM.update(eeprom_count++, spi_in);
+        if (eeprom_count > (ARRAY_SIZE + 8))
+        {
+          init_arrays();
           spi_state = SPI_IDLE;
         }
         break;
@@ -223,7 +251,7 @@ ISR (SPI_STC_vect)
 void checkforchange(uint8_t x_start , uint8_t x_stop , uint8_t block)
 {
   // Check for change in the specified address and set according block, return true if change has occured
-  for (uint8_t x = x_start ; x <= x_stop ; x++)
+  for (uint8_t x = x_start ; x < x_stop ; x++)
     if (datalog[x] != templog[x])
     {
       datalog[x] = templog[x];
@@ -232,25 +260,32 @@ void checkforchange(uint8_t x_start , uint8_t x_stop , uint8_t block)
     }
 } // end of checkforchange
 
-void setup()
+void init_arrays()
 {
-  // Check if EEPROM has the right value for array declaration, dirty fix until later. Could theoretically be removed after one program run
-  EEPROM.update(0, 0xDC);   // 0xDC == Highest available address of registers in CTC
-  EEPROM.update(1, 0x68);   // 0x68 == End of SETTINGS register area
-  EEPROM.update(2, 0x75);   // 0x75 == End of SYSTIME register area
-  EEPROM.update(3, 0x8B);   // 0x8B == End of HISTORICAL register area
-  EEPROM.update(4, 0xAC);   // 0xAC == End of CURRENT register area
-
   // Set different register areas from template stored in EEPROM
   ARRAY_SIZE = EEPROM.read(0);
   SETTINGS = EEPROM.read(1);
   SYSTIME = EEPROM.read(2);
   HISTORICAL = EEPROM.read(3);
   CURRENT = EEPROM.read(4);
+  ALARMS = EEPROM.read(5);
+  LAST_24H = EEPROM.read(6);
+  STATUS = EEPROM.read(7);
 
   // Declare arrays to store samples in, no error checking... I KNOW...
   datalog = static_cast<uint8_t*>(calloc(ARRAY_SIZE, sizeof(uint8_t)));
   templog = static_cast<uint8_t*>(calloc(ARRAY_SIZE, sizeof(uint8_t)));
+  sample_template = static_cast<uint8_t*>(calloc(ARRAY_SIZE, sizeof(uint8_t)));
+
+  // Populate sample_template with values stored in EEPROM
+  for (uint8_t x = 0; x < ARRAY_SIZE  ; x++)
+    sample_template[x] = EEPROM.read(8 + x);
+} // end of init_arrays
+
+void setup()
+{
+  // Initialize arrays with values stored in EEPROM
+  init_arrays();
 
   // Port B0 and B1 output, sync and sample LED
   DDRB |= (1 << DDB0) | (1 << DDB1);
@@ -258,26 +293,25 @@ void setup()
   // Set MISO output
   DDRB |= (1 << DDB4);
 
-  // Interrupt enabled, spi enabled, msb 1st, slave, clk low when idle,
-  // sample on leading edge of clk
+  // Interrupt enabled, SPI enabled, MSB first, slave, CLK low when idle, sample on leading edge of CLK
   SPCR = (1 << SPIE) | (1 << SPE);
 
-  // clear the registers
+  // Clear the registers
   uint8_t clr = SPSR;
   clr = SPDR;
   SPDR = 0x00;
 
-  // enable I2C in slave mode
-  Wire.begin(0x5C);               // slave address
+  // Enable I2C in slave mode
+  Wire.begin(0x5C);               // Slave address
   Wire.onReceive(onWireReceive);  // ISR for I2C-Write
-  Wire.onRequest(onWireRequest);  // iSR for I2C-Read
+  Wire.onRequest(onWireRequest);  // ISR for I2C-Read
 
 } // end of setup
 
 void loop()
 {
   // Set the sync and sample_done LED with the state of the variable:
-  if (sync)
+  if (i2c_sync && spi_sync)
   {
     PORTB |= (1 << PORTB0);
     if (!first_sync && i2c_state == I2C_IDLE)   // Check if this is First contact, then enable autologging, do not alert the Federation...
@@ -295,16 +329,25 @@ void loop()
   if (sample_done && i2c_state == I2C_IDLE)
   {
     // Check for change in SYSTIME, normal every minute
-    checkforchange(0x73 , SYSTIME , B00000001);
+    checkforchange(SETTINGS , SYSTIME , B00000001);
 
     // Check for change in CURRENT, normal every change of temp
-    checkforchange(0x8C , CURRENT , B00000010);
+    checkforchange(HISTORICAL , CURRENT , B00000010);
 
     // Check for change in HISTORICAL, normal every hour and week
-    checkforchange(0x76 , HISTORICAL , B00000100);
+    checkforchange(SYSTIME , HISTORICAL , B00000100);
 
     // Check for change in SETTINGS, hardly ever any changes
-    checkforchange(0x00 , SETTINGS , B00001000);
+    checkforchange(0 , SETTINGS , B00001000);
+
+    // Check for change in ALARMS, hardly ever any changes
+    checkforchange(CURRENT , ALARMS , B00010000);
+
+    // Check for change in LAST_24H, hardly ever any changes
+    checkforchange(ALARMS , LAST_24H , B00100000);
+
+    // Check for change in STATUS, hardly ever any changes
+    checkforchange(LAST_24H , STATUS , B01000000);
 
     i2c_state = I2C_SAMPLE;   // Go for another auto sample!
   }
