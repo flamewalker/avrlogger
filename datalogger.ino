@@ -6,8 +6,7 @@
 #include <Wire.h>
 #include <EEPROM.h>
 
-#define ARRAY_SIZE 0xDC
-#define SETTINGS 0x72
+#define SETTINGS 0x68
 #define SYSTIME 0x75
 #define HISTORICAL 0x8B
 #define CURRENT 0xAC
@@ -44,6 +43,8 @@ volatile uint8_t spi_cmd = 0xFE;
 // Pointer init, later use point to arrays for store of values
 volatile uint8_t *datalog;
 volatile uint8_t *templog;
+
+volatile uint8_t ARRAY_SIZE;
 
 volatile uint8_t count = 0;
 
@@ -178,28 +179,11 @@ ISR (SPI_STC_vect)
             spi_out = 2;
             break;
 
-          case 0x03:                   // Debugging effort, reset some variables
-            i2c_nextcmd[0] = 0xFF;
-            i2c_nextcmd[1] = 0xFF;
-            i2c_state = I2C_IDLE;
-            spi_out = 3;
-            break;
-
           case 0x04:                   // Start transferring array
             if (!new_sample_available)
               break;
             spi_state = SPI_DUMP;
             spi_out = 4;
-            break;
-
-          case 0x05:                   // Force sample_done = true
-            i2c_state = I2C_SAMPLE;
-            spi_out = 5;
-            break;
-
-          case 0x06:                   // Force new_sample_available = true
-            new_sample_available = true;
-            spi_out = 6;
             break;
         }
         break;
@@ -235,15 +219,27 @@ ISR (SPI_STC_vect)
   SPDR = spi_out;
 } // end of SPI ISR
 
+void checkforchange(uint8_t x_start , uint8_t x_stop , uint8_t block)
+{
+  // Check for change in the specified address and set according block, return true if change has occured
+  for (uint8_t x = x_start ; x <= x_stop ; x++)
+    if (datalog[x] != templog[x])
+    {
+      datalog[x] = templog[x];
+      sample_send |= block;
+      new_sample_available = true;
+    }
+} // end of checkforchange
+
 void setup()
 {
   // Check if EEPROM has the right value for array declaration, dirty fix until later
-  EEPROM.update(0,ARRAY_SIZE);
-  uint8_t storlek = EEPROM.read(0);
-  
+  EEPROM.update(0, 0xDC);   // 0xDC == Highest available address of registers in CTC
+  ARRAY_SIZE = EEPROM.read(0);
+
   // Declare arrays to store samples in, no error checking... I KNOW...
-  datalog = static_cast<uint8_t*>(calloc(storlek, sizeof(uint8_t)));
-  templog = static_cast<uint8_t*>(calloc(storlek, sizeof(uint8_t)));
+  datalog = static_cast<uint8_t*>(calloc(ARRAY_SIZE, sizeof(uint8_t)));
+  templog = static_cast<uint8_t*>(calloc(ARRAY_SIZE, sizeof(uint8_t)));
 
   // Port B0 and B1 output, sync and sample LED
   DDRB |= (1 << DDB0) | (1 << DDB1);
@@ -275,7 +271,7 @@ void loop()
     PORTB |= (1 << PORTB0);
     if (!first_sync && i2c_state == I2C_IDLE)   // Check if this is First contact, then enable autologging
     {
-      i2c_state = I2C_SAMPLE;
+      i2c_state = I2C_SAMPLE;   // Start the auto-sampling!
       first_sync = true;
     }
   }
@@ -288,42 +284,18 @@ void loop()
   if (sample_done && i2c_state == I2C_IDLE)
   {
     // Check for change in SYSTIME, normal every minute
-    for (int x = 0x73 ; x <= SYSTIME ; x++)
-      if (datalog[x] != templog[x])
-      {
-        datalog[x] = templog[x];
-        sample_send |= B00000001;
-        new_sample_available = true;
-      }
+    checkforchange(0x73 , SYSTIME , B00000001);
 
-    // Check for change in CURRENT
-    for (int x = 0x8C ; x <= CURRENT ; x++)
-      if (datalog[x] != templog[x])
-      {
-        datalog[x] = templog[x];
-        sample_send |= B00000010;
-        new_sample_available = true;
-      }
+    // Check for change in CURRENT, normal every change of temp
+    checkforchange(0x8C , CURRENT , B00000010);
 
-    // Check for change in HISTORICAL
-    for (int x = 0x76 ; x <= HISTORICAL ; x++)
-      if (datalog[x] != templog[x])
-      {
-        datalog[x] = templog[x];
-        sample_send |= B00000100;
-        new_sample_available = true;
-      }
+    // Check for change in HISTORICAL, normal every hour and week
+    checkforchange(0x76 , HISTORICAL , B00000100);
 
-    // Check for change in SETTINGS
-    for (int x = 0 ; x <= SETTINGS ; x++)
-      if (datalog[x] != templog[x])
-      {
-        datalog[x] = templog[x];
-        sample_send |= B00001000;
-        new_sample_available = true;
-      }
+    // Check for change in SETTINGS, hardly ever any changes
+    checkforchange(0x00 , SETTINGS , B00001000);
 
-    i2c_state = I2C_SAMPLE;
+    i2c_state = I2C_SAMPLE;   // Go for another auto sample!
   }
   if (new_sample_available)
     PORTB |= (1 << PORTB1);
