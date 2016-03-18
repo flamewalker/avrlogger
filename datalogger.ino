@@ -5,6 +5,9 @@
 #include <Wire.h>
 
 #define ARRAY_SIZE 0xDC
+#define SETTINGS 0x72
+#define HISTORICAL 0x8B
+#define CURRENT 0xAC
 
 // State machine declarations for I2C
 enum I2CState
@@ -18,7 +21,7 @@ enum I2CState
 
 volatile uint8_t i2c_state = I2C_IDLE;
 
-// Command buffer for I2C ISR.
+// Command buffer for I2C ISR
 uint8_t i2c_nextcmd[2] = { 0xDE, 0x01 };  // Preload with command to signal Modem = OK , SMS = 1
 
 // State machine declarations for SPI
@@ -44,6 +47,7 @@ volatile uint8_t count = 0;
 // Flags for sampling complete / available for transfer
 volatile boolean sample_done = false;
 volatile boolean new_sample_available = false;
+volatile uint8_t sample_send = 0;
 
 // Flags for contact with CTC Ecologic EXT
 volatile boolean first_sync = false;
@@ -208,10 +212,16 @@ ISR (SPI_STC_vect)
         spi_state = SPI_IDLE;
         break;
 
-      case SPI_DUMP:                   // Transfer whole array in sequence
-        spi_out = datalog[spi_in];
-        if (spi_in == 0xDB)
+      case SPI_DUMP:                   // Transfer the blocks which has changed
+        if (spi_in == 0xFE)
         {
+          spi_out = sample_send;
+          break;
+        }
+        spi_out = datalog[spi_in];
+        if (spi_in == 0xAD)           // Changed to 0xAD in ver 0.8.4, only send up to CURRENT
+        {
+          sample_send = 0;
           new_sample_available = false;
           spi_state = SPI_IDLE;
         }
@@ -248,11 +258,11 @@ void setup()
 
 void loop()
 {
-  // set the sync and sample_done LED with the state of the variable:
+  // Set the sync and sample_done LED with the state of the variable:
   if (sync)
   {
     PORTB |= (1 << PORTB0);
-    if (!first_sync && i2c_state == I2C_IDLE)
+    if (!first_sync && i2c_state == I2C_IDLE)   // Check if this is First contact, then enable autologging
     {
       i2c_state = I2C_SAMPLE;
       first_sync = true;
@@ -263,14 +273,36 @@ void loop()
     PORTB &= ~(1 << PORTB0);
     first_sync = false;
   }
+  // Start checking the status of the newly taken sample versus the last sent
   if (sample_done && i2c_state == I2C_IDLE)
   {
-    for (int x = 0; x < ARRAY_SIZE ; x++)
+    // Check for change in SETTINGS
+    for (int x = 0 ; x <= SETTINGS ; x++)
       if (datalog[x] != templog[x])
       {
         datalog[x] = templog[x];
+        sample_send |= B00000001;
         new_sample_available = true;
       }
+
+    // Check for change in HISTORICAL
+    for (int x = 0x73 ; x <= HISTORICAL ; x++)
+      if (datalog[x] != templog[x])
+      {
+        datalog[x] = templog[x];
+        sample_send |= B00000010;
+        new_sample_available = true;
+      }
+
+    // Check for change in CURRENT
+    for (int x = 0x8C ; x <= CURRENT ; x++)
+      if (datalog[x] != templog[x])
+      {
+        datalog[x] = templog[x];
+        sample_send |= B00000100;
+        new_sample_available = true;
+      }
+
     i2c_state = I2C_SAMPLE;
   }
   if (new_sample_available)
