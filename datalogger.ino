@@ -78,15 +78,17 @@ static void onWireReceive(int numBytes)
       {
         i2c_state = I2C_IDLE;
         i2c_nextcmd[0] = 0xFF;
+        count = 0;
         break;
       }
-      templog[count++] = Wire.read();
-      if (count < ARRAY_SIZE)
+      templog[i2c_nextcmd[0]] = Wire.read();
+      if (++count < ARRAY_SIZE)
         i2c_nextcmd[0] = count;
       else
       {
         i2c_nextcmd[0] = 0xFF;
         sample_done = true;
+        count = 0;
         SPDR = 0xFE;
       }
       i2c_state = I2C_IDLE;
@@ -166,20 +168,31 @@ ISR (SPI_STC_vect)
 
           case 0x02:                   // Start command sequence to I2C master
             spi_state = SPI_COMMAND;
+            spi_out = 2;
             break;
 
-          case 0x05:                   // Force sample_done = true
-            i2c_state = I2C_SAMPLE;
+          case 0x03:                   // Debugging effort, reset some variables
+            i2c_nextcmd[0] = 0xFF;
+            i2c_nextcmd[1] = 0xFF;
+            i2c_state = I2C_IDLE;
+            spi_out = 3;
             break;
 
           case 0x04:                   // Start transferring array
             if (!new_sample_available)
               break;
             spi_state = SPI_DUMP;
+            spi_out = 4;
+            break;
+
+          case 0x05:                   // Force sample_done = true
+            i2c_state = I2C_SAMPLE;
+            spi_out = 5;
             break;
 
           case 0x06:                   // Force new_sample_available = true
             new_sample_available = true;
+            spi_out = 6;
             break;
         }
         break;
