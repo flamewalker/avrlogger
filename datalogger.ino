@@ -7,7 +7,8 @@
 #include <OneWire.h>
 #include <Wire.h>
 
-#define ARRAY_SIZE 0xDC
+// Max size of data array
+#define ARRAY_SIZE 0xAF
 
 // Data wire is plugged into port 2 on the Arduino
 #define ONE_WIRE_BUS 2
@@ -23,26 +24,24 @@ DeviceAddress tempDeviceAddress;
 
 // Variables for handling sampling from OneWire sensors
 float temperature = 0.0;
-int temperaturearray[20];
+int8_t temperaturearray[20];
 unsigned long lastTempRequest = 0;
-int delayInMillis = 750;
+unsigned int delayInMillis = 750;
 
 // State machine declarations for I2C
 enum I2CState
 {
   I2C_IDLE,
   I2C_RESPONSE,
-  I2C_SAMPLE,
   I2C_REQUEST,
   I2C_COMMAND
 };
 
-volatile uint8_t i2c_state = I2C_IDLE;
-volatile uint8_t save_i2cstate = I2C_IDLE;
+static volatile I2CState i2c_state = I2C_IDLE;
 
 // Command buffer for I2C ISR
-uint8_t i2c_nextcmd[2] = { 0xDE, 0x01 };  // Preload with command to signal Modem = OK , SMS = 1
-uint8_t save_i2ccmd[2] = { 0xFF, 0x00 };
+static uint8_t i2c_nextcmd[2] = { 0xDE, 0x01 };    // Preload with command to signal Modem = OK , SMS = 1  For some reason this cannot be volatile, problem with Wire library
+static volatile uint8_t *save_i2ccmd;
 
 // State machine declarations for SPI
 enum SPIState
@@ -53,27 +52,34 @@ enum SPIState
   SPI_DUMP
 };
 
-volatile uint8_t spi_state = SPI_IDLE;
+static volatile SPIState spi_state = SPI_IDLE;
 
 // Command buffer for SPI ISR
-volatile uint8_t spi_cmd = 0xFE;
+static volatile uint8_t spi_cmd[2] = { 0xFF, 0x00 };
 
 // Pointer init, later use point to arrays for store of values
-volatile uint8_t *datalog;
-volatile uint8_t *templog;
+volatile uint8_t *datalog = NULL;
+volatile uint8_t *templog = NULL;
+
+// Debug vars
+static volatile uint8_t *test = NULL;
+static volatile uint8_t test2 = 0;
+static volatile uint8_t slask = 0;
 
 // Counter...
-volatile uint8_t count = 0;
+static volatile uint8_t count = 0;
 
 // Flags for sampling complete / available for transfer
-volatile boolean sample_done = false;
-volatile boolean new_sample_available = false;
-volatile uint8_t sample_send = B01111111;
+static volatile boolean sample_done = false;
+static volatile boolean new_sample_available = false;
+static volatile uint8_t sample_send = B01111111;
+static volatile boolean command_pending = false;
+static volatile boolean sample_pending = false;
+static volatile boolean start_sampling = false;
 
 // Flags for contact with CTC Ecologic EXT
-volatile boolean first_sync = false;
-volatile boolean sync = false;
-volatile boolean first_sample = true;
+static volatile boolean first_sync = false;
+static volatile boolean sync = false;
 
 /*
   I2C-Write from Master
@@ -86,8 +92,23 @@ void onWireReceive(int numBytes)
   switch (i2c_state) {
     case I2C_IDLE:
       // We expect a single byte.
-      if (numBytes != 1 || Wire.read() != 0xFE)
+      slask = Wire.read();
+      if (numBytes != 1 || slask != 0xFE)
+      {
+        test2 |= 1;
+        if (numBytes == 2)
+        {
+          test2 |= 2;
+          // Wire.read();
+        }
         break;
+      }
+      if (start_sampling)
+      {
+        count = 0;
+        i2c_nextcmd[0] = count;
+        start_sampling = false;
+      }
       // Check if this is a command or a register request.
       if (i2c_nextcmd[0] > 0xDB)
         i2c_state = I2C_COMMAND;
@@ -98,38 +119,51 @@ void onWireReceive(int numBytes)
     case I2C_RESPONSE:
       // Expected address and data bytes.
       // First byte should match what we sent.
-      if (numBytes != 2 || Wire.read() != i2c_nextcmd[0])
+      slask = Wire.read();
+      if (numBytes != 2 || slask != i2c_nextcmd[0])
       {
-        i2c_state = I2C_IDLE;
-        i2c_nextcmd[0] = 0xFF;
-        count = 0;
+        if (numBytes == 1 && slask == 0xFE)
+        {
+          test2 |= 4;
+          // Check if this is a command or a register request.
+          if (i2c_nextcmd[0] > 0xDB)
+            i2c_state = I2C_COMMAND;
+          else
+            i2c_state = I2C_REQUEST;
+        }
+        else
+        {
+          test2 |= 8;
+          slask = Wire.read();
+          i2c_state = I2C_IDLE;
+        }
         break;
       }
       templog[i2c_nextcmd[0]] = Wire.read();
+      sample_pending = true;
       if (++count < ARRAY_SIZE)
         i2c_nextcmd[0] = count;
       else
       {
-        i2c_nextcmd[0] = 0xFF;
+        save_i2ccmd[0] = 0xFF;
+        i2c_nextcmd[0] = save_i2ccmd[0];
+        //        i2c_nextcmd[1] = 0x00;
         sample_done = true;
         count = 0;
+      }
+      if (command_pending)
+      {
+        save_i2ccmd[0] = i2c_nextcmd[0];
+        save_i2ccmd[1] = i2c_nextcmd[1];
+        i2c_nextcmd[0] = spi_cmd[0];
+        i2c_nextcmd[1] = spi_cmd[1];
       }
       i2c_state = I2C_IDLE;
       break;
 
-    case I2C_SAMPLE:
-      // We expect a single byte.
-      if (numBytes != 1 || Wire.read() != 0xFE)
-        break;
-      // Start a new sample sequence
-      count = 0;
-      i2c_nextcmd[0] = count;
-      i2c_state = I2C_REQUEST;
-      break;
-
     default:
+      test2 |= 64;
       i2c_state = I2C_IDLE;
-      i2c_nextcmd[0] = 0xFF;
   }
 } // end of I2C-Write from Master
 
@@ -147,25 +181,29 @@ void onWireRequest()
     case I2C_COMMAND:
       // No-op/ping is a single byte.
       if (i2c_nextcmd[0] == 0xFF)
-      {
         Wire.write(i2c_nextcmd, 1);
-        i2c_state = I2C_IDLE;
-      }
       else
       {
         Wire.write(i2c_nextcmd, 2);
-        i2c_state = save_i2cstate;
         i2c_nextcmd[0] = save_i2ccmd[0];
         i2c_nextcmd[1] = save_i2ccmd[1];
-        save_i2cstate = I2C_IDLE;
-        save_i2ccmd[0] = 0xFF;
-        save_i2ccmd[1] = 0x00;
+        //       save_i2ccmd[0] = 0xFF;
+        //       save_i2ccmd[1] = 0x00;
+        command_pending = false;
       }
+      i2c_state = I2C_IDLE;
       break;
 
     default:
-      i2c_state = I2C_IDLE;
+      save_i2ccmd[0] = i2c_nextcmd[0];
+      save_i2ccmd[1] = i2c_nextcmd[1];
       i2c_nextcmd[0] = 0xFF;
+      i2c_nextcmd[1] = 0x00;
+      Wire.write(i2c_nextcmd, 1);
+      i2c_nextcmd[0] = save_i2ccmd[0];
+      i2c_nextcmd[1] = save_i2ccmd[1];
+      i2c_state = I2C_IDLE;
+      test2 |= 128;
   }
 } // end of I2C-Read from Master
 
@@ -203,22 +241,82 @@ ISR (SPI_STC_vect)
             spi_state = SPI_DUMP;
             spi_out = 0xF0;
             break;
+
+          case 0xF2:
+            spi_out = sample_done;
+            break;
+
+          case 0xF3:
+            spi_out = i2c_state;
+            break;
+
+          case 0xF4:
+            test = i2c_nextcmd;
+            spi_out = *test;
+            break;
+
+          case 0xF5:
+            test = i2c_nextcmd;
+            test++;
+            spi_out = *test;
+            break;
+
+          case 0xF6:
+            spi_out = sample_pending;
+            break;
+
+          case 0xF7:
+            spi_out = test2;
+            break;
+
+          case 0xF8:
+            spi_out = slask;
+            break;
+
+          case 0xF9:
+            spi_out = count;
+            break;
+
+          case 0xFA:
+            if (!start_sampling)
+              start_sampling = true;
+            spi_out = 0xFA;
+            break;
         }
         break;
 
       case SPI_COMMAND:                // First byte of command sequence
-        spi_cmd = spi_in;
+        spi_cmd[0] = spi_in;
         spi_state = SPI_COMMAND_BYTE;
         spi_out = spi_in;
         break;
 
       case SPI_COMMAND_BYTE:           // Second byte of command sequence
-        save_i2ccmd[0] = i2c_nextcmd[0];
-        save_i2ccmd[1] = i2c_nextcmd[1];
-        save_i2cstate = i2c_state;
-        i2c_nextcmd[0] = spi_cmd;
-        i2c_nextcmd[1] = spi_in;
-        i2c_state = I2C_IDLE;
+        spi_cmd[1] = spi_in;
+        switch (i2c_state)
+        {
+          case I2C_REQUEST:
+          case I2C_COMMAND:
+            save_i2ccmd[0] = i2c_nextcmd[0];
+            save_i2ccmd[1] = i2c_nextcmd[1];
+            i2c_nextcmd[0] = spi_cmd[0];
+            i2c_nextcmd[1] = spi_cmd[1];
+            i2c_state = I2C_COMMAND;
+            break;
+
+          case I2C_RESPONSE:
+            i2c_state = I2C_RESPONSE;
+            command_pending = true;
+            break;
+
+          case I2C_IDLE:
+            save_i2ccmd[0] = i2c_nextcmd[0];
+            save_i2ccmd[1] = i2c_nextcmd[1];
+            i2c_nextcmd[0] = spi_cmd[0];
+            i2c_nextcmd[1] = spi_cmd[1];
+            i2c_state = I2C_IDLE;
+            break;
+        }
         spi_state = SPI_IDLE;
         spi_out = spi_in;
         break;
@@ -256,18 +354,13 @@ ISR (SPI_STC_vect)
 
 void checkforchange(uint8_t x_start , uint8_t x_stop , uint8_t block)
 {
-  uint8_t diff = 0;
   // Check for change in the specified address and set according block, return true if change has occured
   for (uint8_t x = x_start ; x <= x_stop ; x++)
     if (datalog[x] != templog[x])
     {
-      diff = abs(datalog[x] - templog[x]);
-      if (diff < 10 || first_sample)
-      {
-        datalog[x] = templog[x];
-        sample_send |= block;
-        new_sample_available = true;
-      }
+      datalog[x] = templog[x];
+      sample_send |= block;
+      new_sample_available = true;
     }
 } // end of checkforchange
 
@@ -276,6 +369,7 @@ void setup()
   // Declare arrays to store samples in, no error checking... I KNOW...
   datalog = static_cast<uint8_t*>(calloc(ARRAY_SIZE, sizeof(uint8_t)));
   templog = static_cast<uint8_t*>(calloc(ARRAY_SIZE, sizeof(uint8_t)));
+  save_i2ccmd = static_cast<uint8_t*>(calloc(2, sizeof(uint8_t)));
 
   // Initialize OneWire sensors
   sensors.begin();
@@ -291,16 +385,16 @@ void setup()
   // Set MISO output
   DDRB |= (1 << DDB4);
 
-  // Interrupt enabled, spi enabled, msb 1st, slave, clk low when idle,
-  // sample on leading edge of clk
+  // Interrupt enabled, SPI enabled, MSB first, Slave, CLK low when idle,
+  // Sample on leading edge of CLK
   SPCR = (1 << SPIE) | (1 << SPE);
 
-  // clear the registers
+  // Clear the registers
   uint8_t clr = SPSR;
   clr = SPDR;
   SPDR = 0x00;
 
-  // enable I2C in slave mode
+  // Enable I2C in slave mode
   Wire.begin(0x5C);               // slave address
   Wire.onReceive(onWireReceive);  // ISR for I2C-Write
   Wire.onRequest(onWireRequest);  // ISR for I2C-Read
@@ -314,14 +408,12 @@ void loop()
   {
     if (!first_sync && i2c_state == I2C_IDLE)   // Check if this is First contact, then enable autologging, do not alert the Federation...
     {
-      i2c_state = I2C_SAMPLE;   // Start the auto-sampling!
+      start_sampling = true;                    // Start the auto-sampling!
       first_sync = true;
     }
   }
   else
-  {
     first_sync = false;
-  }
 
   if (millis() - lastTempRequest >= delayInMillis)
   {
@@ -366,11 +458,11 @@ void loop()
     checkforchange(0xA5 , 0xA7 , B01000000);
 
     sample_done = false;
-    first_sample = false;
-    i2c_state = I2C_SAMPLE;   // Go for another auto sample!
+    sample_pending = false;
+    start_sampling = true;       // Go for another auto sample!
   }
   if (new_sample_available)
-    PORTD |= (1 << PORTD7);
+    PORTD |= (1 << PORTD7);      // Set the interrupt line HIGH
   else
     PORTD &= ~(1 << PORTD7);
 } // end of loop
