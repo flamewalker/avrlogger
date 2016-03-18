@@ -43,7 +43,8 @@ volatile uint8_t count = 0;
 // Flag for sampling complete
 volatile boolean sample_done = false;
 
-// Flag for contact with CTC Ecologic EXT
+// Flags for contact with CTC Ecologic EXT
+volatile boolean first_sync = false;
 volatile boolean sync = false;
 
 /*
@@ -231,9 +232,19 @@ void loop()
 {
   // set the sync and sample_done LED with the state of the variable:
   if (sync)
+  {
     PORTB |= (1 << PORTB0);
+    if (!first_sync && i2c_state==I2C_IDLE)
+    {
+      i2c_state=I2C_SAMPLE;
+      first_sync = true;
+    }
+  }
   else
+  {
     PORTB &= ~(1 << PORTB0);
+    first_sync = false;
+  }
   if (sample_done)
     PORTB |= (1 << PORTB1);
   else
