@@ -1,6 +1,6 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 0.9.0
+    ver 0.9.1
 **/
 
 #include <DallasTemperature.h>
