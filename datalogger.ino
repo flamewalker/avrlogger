@@ -1,6 +1,6 @@
 /**
  *  I2C interface to SPI for CTC Ecologic EXT
- *  ver 0.8.1
+ *  ver 0.8.2
 **/
 #include <Wire.h>
 
