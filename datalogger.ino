@@ -2,7 +2,9 @@
  *  I2C interface to SPI for CTC Ecologic EXT
  *  ver 0.8.5
 **/
+
 #include <Wire.h>
+#include <EEPROM.h>
 
 #define ARRAY_SIZE 0xDC
 #define SETTINGS 0x72
@@ -39,9 +41,9 @@ volatile uint8_t spi_state = SPI_IDLE;
 // Command buffer for SPI ISR
 volatile uint8_t spi_cmd = 0xFE;
 
-// Array init for storing logged values
-volatile uint8_t datalog[ARRAY_SIZE];
-volatile uint8_t templog[ARRAY_SIZE];
+// Pointer init for arrays storing logged values
+volatile uint8_t *datalog;
+volatile uint8_t *templog;
 
 volatile uint8_t count = 0;
 
@@ -86,7 +88,7 @@ static void onWireReceive(int numBytes)
         count = 0;
         break;
       }
-      templog[i2c_nextcmd[0]] = Wire.read();
+      *(templog + i2c_nextcmd[0]) = Wire.read();
       if (++count < ARRAY_SIZE)
         i2c_nextcmd[0] = count;
       else
@@ -219,7 +221,7 @@ ISR (SPI_STC_vect)
           spi_out = sample_send;
           break;
         }
-        spi_out = datalog[spi_in];
+        spi_out = *(datalog + spi_in);
         if (spi_in == 0xAD)           // Changed to 0xAD in ver 0.8.4, only send up to CURRENT
         {
           sample_send = 0;
@@ -235,6 +237,12 @@ ISR (SPI_STC_vect)
 
 void setup()
 {
+  // Declare arrays to store samples in
+  uint8_t old_sample[ARRAY_SIZE];
+  uint8_t new_sample[ARRAY_SIZE];
+  datalog = old_sample;
+  templog = new_sample;
+
   // Port B0 and B1 output, sync and sample LED
   DDRB |= (1 << DDB0) | (1 << DDB1);
 
@@ -279,36 +287,36 @@ void loop()
   {
     // Check for change in SYSTIME, normal every minute
     for (int x = 0x73 ; x <= SYSTIME ; x++)
-      if (datalog[x] != templog[x])
+      if (*(datalog + x) != *(templog + x))
       {
-        datalog[x] = templog[x];
+        *(datalog + x) = *(templog + x);
         sample_send |= B00000001;
         new_sample_available = true;
       }
 
     // Check for change in CURRENT
     for (int x = 0x8C ; x <= CURRENT ; x++)
-      if (datalog[x] != templog[x])
+      if (*(datalog + x) != *(templog + x))
       {
-        datalog[x] = templog[x];
+        *(datalog + x) = *(templog + x);
         sample_send |= B00000010;
         new_sample_available = true;
       }
 
     // Check for change in HISTORICAL
     for (int x = 0x76 ; x <= HISTORICAL ; x++)
-      if (datalog[x] != templog[x])
+      if (*(datalog + x) != *(templog + x))
       {
-        datalog[x] = templog[x];
+        *(datalog + x) = *(templog + x);
         sample_send |= B00000100;
         new_sample_available = true;
       }
 
     // Check for change in SETTINGS
     for (int x = 0 ; x <= SETTINGS ; x++)
-      if (datalog[x] != templog[x])
+      if (*(datalog + x) != *(templog + x))
       {
-        datalog[x] = templog[x];
+        *(datalog + x) = *(templog + x);
         sample_send |= B00001000;
         new_sample_available = true;
       }
