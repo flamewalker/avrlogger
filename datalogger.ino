@@ -6,11 +6,6 @@
 #include <Wire.h>
 #include <EEPROM.h>
 
-#define SETTINGS 0x68
-#define SYSTIME 0x75
-#define HISTORICAL 0x8B
-#define CURRENT 0xAC
-
 // State machine declarations for I2C
 enum I2CState
 {
@@ -44,8 +39,14 @@ volatile uint8_t spi_cmd = 0xFE;
 volatile uint8_t *datalog;
 volatile uint8_t *templog;
 
+// Global dirty variables for register areas
 volatile uint8_t ARRAY_SIZE;
+volatile uint8_t SETTINGS;
+volatile uint8_t SYSTIME;
+volatile uint8_t HISTORICAL;
+volatile uint8_t CURRENT;
 
+// Counter...
 volatile uint8_t count = 0;
 
 // Flags for sampling complete / available for transfer
@@ -233,9 +234,19 @@ void checkforchange(uint8_t x_start , uint8_t x_stop , uint8_t block)
 
 void setup()
 {
-  // Check if EEPROM has the right value for array declaration, dirty fix until later
+  // Check if EEPROM has the right value for array declaration, dirty fix until later. Could theoretically be removed after one program run
   EEPROM.update(0, 0xDC);   // 0xDC == Highest available address of registers in CTC
+  EEPROM.update(1, 0x68);   // 0x68 == End of SETTINGS register area
+  EEPROM.update(2, 0x75);   // 0x75 == End of SYSTIME register area
+  EEPROM.update(3, 0x8B);   // 0x8B == End of HISTORICAL register area
+  EEPROM.update(4, 0xAC);   // 0xAC == End of CURRENT register area
+
+  // Set different register areas from template stored in EEPROM
   ARRAY_SIZE = EEPROM.read(0);
+  SETTINGS = EEPROM.read(1);
+  SYSTIME = EEPROM.read(2);
+  HISTORICAL = EEPROM.read(3);
+  CURRENT = EEPROM.read(4);
 
   // Declare arrays to store samples in, no error checking... I KNOW...
   datalog = static_cast<uint8_t*>(calloc(ARRAY_SIZE, sizeof(uint8_t)));
@@ -269,7 +280,7 @@ void loop()
   if (sync)
   {
     PORTB |= (1 << PORTB0);
-    if (!first_sync && i2c_state == I2C_IDLE)   // Check if this is First contact, then enable autologging
+    if (!first_sync && i2c_state == I2C_IDLE)   // Check if this is First contact, then enable autologging, do not alert the Federation...
     {
       i2c_state = I2C_SAMPLE;   // Start the auto-sampling!
       first_sync = true;
