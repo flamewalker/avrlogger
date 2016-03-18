@@ -37,11 +37,13 @@ volatile uint8_t spi_cmd = 0xFE;
 
 // Array init for storing logged values
 volatile uint8_t datalog[ARRAY_SIZE];
+volatile uint8_t templog[ARRAY_SIZE];
 
 volatile uint8_t count = 0;
 
-// Flag for sampling complete
+// Flags for sampling complete / available for transfer
 volatile boolean sample_done = false;
+volatile boolean new_sample_available = false;
 
 // Flags for contact with CTC Ecologic EXT
 volatile boolean first_sync = false;
@@ -78,7 +80,7 @@ static void onWireReceive(int numBytes)
         i2c_nextcmd[0] = 0xFF;
         break;
       }
-      datalog[count++] = Wire.read();
+      templog[count++] = Wire.read();
       if (count < ARRAY_SIZE)
         i2c_nextcmd[0] = count;
       else
@@ -149,7 +151,7 @@ ISR (SPI_STC_vect)
   if (!sync)
     spi_out = 0;                       // Not in sync with I2C master yet
   else {
-    if (!sample_done)
+    if (!new_sample_available)
       spi_out = 1;                     // In sync with I2C master, no new sample available
 
     switch (spi_state) {
@@ -159,23 +161,25 @@ ISR (SPI_STC_vect)
             break;
 
           case 0xFF:                   // Start sample sequence from I2C master
-            i2c_state = I2C_SAMPLE;
+            //            i2c_state = I2C_SAMPLE;
             break;
 
           case 0x02:                   // Start command sequence to I2C master
             spi_state = SPI_COMMAND;
             break;
 
+          case 0x05:                   // Force sample_done = true
+            i2c_state = I2C_SAMPLE;
+            break;
+
           case 0x04:                   // Start transferring array
-            if (!sample_done)
+            if (!new_sample_available)
               break;
             spi_state = SPI_DUMP;
             break;
 
-          case 0x05:                   // Start transferring array
-            if (!sample_done)
-              break;
-            spi_state = SPI_DUMP;
+          case 0x06:                   // Force new_sample_available = true
+            new_sample_available = true;
             break;
         }
         break;
@@ -193,8 +197,9 @@ ISR (SPI_STC_vect)
 
       case SPI_DUMP:                   // Transfer whole array in sequence
         spi_out = datalog[spi_in];
-        if (spi_in == 0xDB) {
-          sample_done = false;
+        if (spi_in == 0xDB)
+        {
+          new_sample_available = false;
           spi_state = SPI_IDLE;
         }
         break;
@@ -234,9 +239,9 @@ void loop()
   if (sync)
   {
     PORTB |= (1 << PORTB0);
-    if (!first_sync && i2c_state==I2C_IDLE)
+    if (!first_sync && i2c_state == I2C_IDLE)
     {
-      i2c_state=I2C_SAMPLE;
+      i2c_state = I2C_SAMPLE;
       first_sync = true;
     }
   }
@@ -245,7 +250,17 @@ void loop()
     PORTB &= ~(1 << PORTB0);
     first_sync = false;
   }
-  if (sample_done)
+  if (sample_done && i2c_state == I2C_IDLE)
+  {
+    for (int x = 0; x < ARRAY_SIZE ; x++)
+      if (datalog[x] != templog[x])
+      {
+        datalog[x] = templog[x];
+        new_sample_available = true;
+      }
+    i2c_state = I2C_SAMPLE;
+  }
+  if (new_sample_available)
     PORTB |= (1 << PORTB1);
   else
     PORTB &= ~(1 << PORTB1);
