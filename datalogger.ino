@@ -3,8 +3,29 @@
     ver 0.9.0
 **/
 
+#include <DallasTemperature.h>
+#include <OneWire.h>
 #include <Wire.h>
-#include <EEPROM.h>
+
+#define ARRAY_SIZE 0xDC
+
+// Data wire is plugged into port 2 on the Arduino
+#define ONE_WIRE_BUS 2
+
+// Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
+OneWire oneWire(ONE_WIRE_BUS);
+
+// Pass our oneWire reference to Dallas Temperature.
+DallasTemperature sensors(&oneWire);
+
+// Array to hold device address
+DeviceAddress tempDeviceAddress;
+
+// Variables for handling sampling from OneWire sensors
+float temperature = 0.0;
+int temperaturearray[20];
+unsigned long lastTempRequest = 0;
+int delayInMillis = 750;
 
 // State machine declarations for I2C
 enum I2CState
@@ -17,9 +38,11 @@ enum I2CState
 };
 
 volatile uint8_t i2c_state = I2C_IDLE;
+volatile uint8_t save_i2cstate = I2C_IDLE;
 
 // Command buffer for I2C ISR
 uint8_t i2c_nextcmd[2] = { 0xDE, 0x01 };  // Preload with command to signal Modem = OK , SMS = 1
+uint8_t save_i2ccmd[2] = { 0xFF, 0x00 };
 
 // State machine declarations for SPI
 enum SPIState
@@ -39,16 +62,6 @@ volatile uint8_t spi_cmd = 0xFE;
 volatile uint8_t *datalog;
 volatile uint8_t *templog;
 
-// Global dirty variables for register areas
-volatile uint8_t ARRAY_SIZE;
-volatile uint8_t SETTINGS;
-volatile uint8_t SYSTIME;
-volatile uint8_t HISTORICAL;
-volatile uint8_t CURRENT;
-volatile uint8_t LAST_24H;
-volatile uint8_t ALARMS;
-volatile uint8_t STATUS;
-
 // Counter...
 volatile uint8_t count = 0;
 
@@ -60,6 +73,7 @@ volatile uint8_t sample_send = B01111111;
 // Flags for contact with CTC Ecologic EXT
 volatile boolean first_sync = false;
 volatile boolean sync = false;
+volatile boolean first_sample = true;
 
 /*
   I2C-Write from Master
@@ -108,7 +122,6 @@ void onWireReceive(int numBytes)
       if (numBytes != 1 || Wire.read() != 0xFE)
         break;
       // Start a new sample sequence
-      sample_done = false;
       count = 0;
       i2c_nextcmd[0] = count;
       i2c_state = I2C_REQUEST;
@@ -134,12 +147,20 @@ void onWireRequest()
     case I2C_COMMAND:
       // No-op/ping is a single byte.
       if (i2c_nextcmd[0] == 0xFF)
+      {
         Wire.write(i2c_nextcmd, 1);
+        i2c_state = I2C_IDLE;
+      }
       else
+      {
         Wire.write(i2c_nextcmd, 2);
-
-      i2c_state = I2C_IDLE;
-      i2c_nextcmd[0] = 0xFF;
+        i2c_state = save_i2cstate;
+        i2c_nextcmd[0] = save_i2ccmd[0];
+        i2c_nextcmd[1] = save_i2ccmd[1];
+        save_i2cstate = I2C_IDLE;
+        save_i2ccmd[0] = 0xFF;
+        save_i2ccmd[1] = 0x00;
+      }
       break;
 
     default:
@@ -188,12 +209,18 @@ ISR (SPI_STC_vect)
       case SPI_COMMAND:                // First byte of command sequence
         spi_cmd = spi_in;
         spi_state = SPI_COMMAND_BYTE;
+        spi_out = spi_in;
         break;
 
       case SPI_COMMAND_BYTE:           // Second byte of command sequence
+        save_i2ccmd[0] = i2c_nextcmd[0];
+        save_i2ccmd[1] = i2c_nextcmd[1];
+        save_i2cstate = i2c_state;
         i2c_nextcmd[0] = spi_cmd;
         i2c_nextcmd[1] = spi_in;
+        i2c_state = I2C_IDLE;
         spi_state = SPI_IDLE;
+        spi_out = spi_in;
         break;
 
       case SPI_DUMP:                   // Routine for transferring data
@@ -206,10 +233,17 @@ ISR (SPI_STC_vect)
         }
         if (spi_in >= 0xAD)           // Changed to 0xAD in ver 0.8.4, only send up to CURRENT
         {
-          sample_send = 0;
-          new_sample_available = false;
-          spi_state = SPI_IDLE;
-          break;
+          if (spi_in >= 0xB0 && spi_in <= 0xBF)
+          {
+            spi_out = temperaturearray[spi_in - 0xB0];
+          }
+          else
+          {
+            sample_send = 0;
+            new_sample_available = false;
+            spi_state = SPI_IDLE;
+            break;
+          }
         }
         else
           spi_out = datalog[spi_in];
@@ -222,41 +256,37 @@ ISR (SPI_STC_vect)
 
 void checkforchange(uint8_t x_start , uint8_t x_stop , uint8_t block)
 {
+  uint8_t diff = 0;
   // Check for change in the specified address and set according block, return true if change has occured
   for (uint8_t x = x_start ; x <= x_stop ; x++)
     if (datalog[x] != templog[x])
     {
-      datalog[x] = templog[x];
-      sample_send |= block;
-      new_sample_available = true;
+      diff = abs(datalog[x] - templog[x]);
+      if (diff < 10 || first_sample)
+      {
+        datalog[x] = templog[x];
+        sample_send |= block;
+        new_sample_available = true;
+      }
     }
 } // end of checkforchange
 
 void setup()
 {
-  // Check if EEPROM has the right value for array declaration, dirty fix until later. Could theoretically be removed after one program run
-  EEPROM.update(0, 0xDC);   // 0xDC == Highest available address of registers in CTC
-  EEPROM.update(1, 0x68);   // 0x68 == End of SETTINGS register area
-  EEPROM.update(2, 0x75);   // 0x75 == End of SYSTIME register area
-  EEPROM.update(3, 0x8B);   // 0x8B == End of HISTORICAL register area
-  EEPROM.update(4, 0xAC);   // 0xAC == End of CURRENT register area
-
-  // Set different register areas from template stored in EEPROM
-  ARRAY_SIZE = EEPROM.read(0);
-  SETTINGS = EEPROM.read(1);
-  SYSTIME = EEPROM.read(2);
-  HISTORICAL = EEPROM.read(3);
-  CURRENT = EEPROM.read(4);
-  ALARMS = EEPROM.read(5);
-  LAST_24H = EEPROM.read(6);
-  STATUS = EEPROM.read(7);
-
   // Declare arrays to store samples in, no error checking... I KNOW...
   datalog = static_cast<uint8_t*>(calloc(ARRAY_SIZE, sizeof(uint8_t)));
   templog = static_cast<uint8_t*>(calloc(ARRAY_SIZE, sizeof(uint8_t)));
 
-  // Port B0 and B1 output, sync and sample LED
-  DDRB |= (1 << DDB0) | (1 << DDB1);
+  // Initialize OneWire sensors
+  sensors.begin();
+  sensors.getAddress(tempDeviceAddress, 0);
+  sensors.setResolution(tempDeviceAddress, 12);
+  sensors.setWaitForConversion(false);
+  sensors.requestTemperatures();
+  lastTempRequest = millis();
+
+  // Port D7 output, sample_ready signal
+  DDRD |= (1 << DDD7);
 
   // Set MISO output
   DDRB |= (1 << DDB4);
@@ -273,7 +303,7 @@ void setup()
   // enable I2C in slave mode
   Wire.begin(0x5C);               // slave address
   Wire.onReceive(onWireReceive);  // ISR for I2C-Write
-  Wire.onRequest(onWireRequest);  // iSR for I2C-Read
+  Wire.onRequest(onWireRequest);  // ISR for I2C-Read
 
 } // end of setup
 
@@ -282,7 +312,6 @@ void loop()
   // Set the sync and sample_done LED with the state of the variable:
   if (sync)
   {
-    PORTB |= (1 << PORTB0);
     if (!first_sync && i2c_state == I2C_IDLE)   // Check if this is First contact, then enable autologging, do not alert the Federation...
     {
       i2c_state = I2C_SAMPLE;   // Start the auto-sampling!
@@ -291,9 +320,21 @@ void loop()
   }
   else
   {
-    PORTB &= ~(1 << PORTB0);
     first_sync = false;
   }
+
+  if (millis() - lastTempRequest >= delayInMillis)
+  {
+    temperature = sensors.getTempCByIndex(0);
+    if (temperature != DEVICE_DISCONNECTED_C)
+    {
+      temperaturearray[0] = (int)temperature;
+      temperaturearray[1] = (int)round(temperature * 100.0) - (temperaturearray[0] * 100);
+    }
+    sensors.requestTemperatures();
+    lastTempRequest = millis();
+  }
+
   // Start checking the status of the newly taken sample versus the last sent
   if (sample_done && i2c_state == I2C_IDLE)
   {
@@ -324,10 +365,12 @@ void loop()
     checkforchange(0x9A , 0x9A , B01000000);
     checkforchange(0xA5 , 0xA7 , B01000000);
 
+    sample_done = false;
+    first_sample = false;
     i2c_state = I2C_SAMPLE;   // Go for another auto sample!
   }
   if (new_sample_available)
-    PORTB |= (1 << PORTB1);
+    PORTD |= (1 << PORTD7);
   else
-    PORTB &= ~(1 << PORTB1);
+    PORTD &= ~(1 << PORTD7);
 } // end of loop
