@@ -1,6 +1,6 @@
 /**
  *  I2C interface to SPI for CTC Ecologic EXT
- *  ver 0.6.0
+ *  ver 0.7.0
 **/
 #include <Wire.h>
 
@@ -52,7 +52,7 @@ volatile boolean sync = false;
 static void onWireReceive(int numBytes)
 {
   if (!sync) {      // If we got this far, we're in sync!
-    SPDR = 0x01;
+    SPDR = 0x01;    // Preload with sync message
     sync = true;
   }
 
@@ -206,21 +206,19 @@ ISR (SPI_STC_vect)
 void setup()
 {
   // Port B0 and B1 output, sync and sample LED
-  DDRB = (1 << DDB0) | (1 << DDB1);
+  DDRB |= (1 << DDB0) | (1 << DDB1);
 
   // Set MISO output
-  pinMode(MISO, OUTPUT);
+  DDRB |= (1 << DDB4);
 
-  // enable SPI in slave mode
-  SPCR |= _BV(SPE);
+  // Interrupt enabled, spi enabled, msb 1st, slave, clk low when idle,
+  // sample on leading edge of clk, system clock/16 rate
+  SPCR = (1 << SPIE) | (1 << SPE);
 
   // clear the registers
   uint8_t clr = SPSR;
   clr = SPDR;
   SPDR = 0x00;
-
-  // now turn on interrupts
-  SPCR |= _BV(SPIE);
 
   // enable I2C in slave mode
   Wire.begin(0x5C);               // slave address
@@ -232,5 +230,12 @@ void setup()
 void loop()
 {
   // set the sync and sample_done LED with the state of the variable:
-  PORTB = (sync << PB0) | (sample_done << PB1);
+  if (sync)
+    PORTB |= (1 << PORTB0);
+  else
+    PORTB &= ~(1 << PORTB0);
+  if (sample_done)
+    PORTB |= (1 << PORTB1);
+  else
+    PORTB &= ~(1 << PORTB1);
 } // end of loop
