@@ -6,6 +6,7 @@
 
 #define ARRAY_SIZE 0xDC
 #define SETTINGS 0x72
+#define SYSTIME 0x75
 #define HISTORICAL 0x8B
 #define CURRENT 0xAC
 
@@ -276,21 +277,12 @@ void loop()
   // Start checking the status of the newly taken sample versus the last sent
   if (sample_done && i2c_state == I2C_IDLE)
   {
-    // Check for change in SETTINGS
-    for (int x = 0 ; x <= SETTINGS ; x++)
+    // Check for change in SYSTIME, normal every minute
+    for (int x = 0x73 ; x <= SYSTIME ; x++)
       if (datalog[x] != templog[x])
       {
         datalog[x] = templog[x];
         sample_send |= B00000001;
-        new_sample_available = true;
-      }
-
-    // Check for change in HISTORICAL
-    for (int x = 0x73 ; x <= HISTORICAL ; x++)
-      if (datalog[x] != templog[x])
-      {
-        datalog[x] = templog[x];
-        sample_send |= B00000010;
         new_sample_available = true;
       }
 
@@ -299,7 +291,25 @@ void loop()
       if (datalog[x] != templog[x])
       {
         datalog[x] = templog[x];
+        sample_send |= B00000010;
+        new_sample_available = true;
+      }
+
+    // Check for change in HISTORICAL
+    for (int x = 0x76 ; x <= HISTORICAL ; x++)
+      if (datalog[x] != templog[x])
+      {
+        datalog[x] = templog[x];
         sample_send |= B00000100;
+        new_sample_available = true;
+      }
+
+    // Check for change in SETTINGS
+    for (int x = 0 ; x <= SETTINGS ; x++)
+      if (datalog[x] != templog[x])
+      {
+        datalog[x] = templog[x];
+        sample_send |= B00001000;
         new_sample_available = true;
       }
 
