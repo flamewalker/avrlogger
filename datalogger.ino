@@ -163,7 +163,6 @@ void onWireReceive(int numBytes)
 
     default:
       test2 |= 64;
-      i2c_state = I2C_IDLE;
   }
 } // end of I2C-Write from Master
 
