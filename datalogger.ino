@@ -34,7 +34,8 @@ enum I2CState
   I2C_IDLE,
   I2C_RESPONSE,
   I2C_REQUEST,
-  I2C_COMMAND
+  I2C_COMMAND,
+  I2C_DEBUG
 };
 
 static volatile I2CState i2c_state = I2C_IDLE;
@@ -64,7 +65,10 @@ volatile uint8_t *templog = NULL;
 // Debug vars
 static volatile uint8_t *test = NULL;
 static volatile uint8_t test2 = 0;
-static volatile uint8_t slask = 0;
+static volatile uint8_t slask_id = 0;
+static volatile uint8_t slask_re = 0;
+static volatile I2CState state_dbg_wr = I2C_DEBUG;
+static volatile I2CState state_dbg_re = I2C_DEBUG;
 
 // Counter...
 static volatile uint8_t count = 0;
@@ -84,7 +88,7 @@ static volatile boolean sync = false;
 /*
   I2C-Write from Master
 */
-void onWireReceive(int numBytes)
+static void onWireReceive(int numBytes)
 {
   if (!sync)                  // If we got this far, we're in sync!
     sync = true;
@@ -92,8 +96,8 @@ void onWireReceive(int numBytes)
   switch (i2c_state) {
     case I2C_IDLE:
       // We expect a single byte.
-      slask = Wire.read();
-      if (numBytes != 1 || slask != 0xFE)
+      slask_id = Wire.read();
+      if (numBytes != 1 || slask_id != 0xFE)
       {
         test2 |= 1;
         if (numBytes == 2)
@@ -103,7 +107,7 @@ void onWireReceive(int numBytes)
         }
         break;
       }
-      if (start_sampling)
+      if (start_sampling && !command_pending)
       {
         count = 0;
         i2c_nextcmd[0] = count;
@@ -119,10 +123,10 @@ void onWireReceive(int numBytes)
     case I2C_RESPONSE:
       // Expected address and data bytes.
       // First byte should match what we sent.
-      slask = Wire.read();
-      if (numBytes != 2 || slask != i2c_nextcmd[0])
+      slask_re = Wire.read();
+      if (numBytes != 2 || slask_re != i2c_nextcmd[0])
       {
-        if (numBytes == 1 && slask == 0xFE)
+        if (numBytes == 1 && slask_re == 0xFE)
         {
           test2 |= 4;
           // Check if this is a command or a register request.
@@ -134,7 +138,7 @@ void onWireReceive(int numBytes)
         else
         {
           test2 |= 8;
-          slask = Wire.read();
+          slask_re = Wire.read();
           i2c_state = I2C_IDLE;
         }
         break;
@@ -163,6 +167,7 @@ void onWireReceive(int numBytes)
 
     default:
       test2 |= 64;
+      state_dbg_wr = i2c_state;
       i2c_state = I2C_IDLE;
   }
 } // end of I2C-Write from Master
@@ -170,7 +175,7 @@ void onWireReceive(int numBytes)
 /*
   I2C-Read from Master
 */
-void onWireRequest()
+static void onWireRequest()
 {
   switch (i2c_state) {
     case I2C_REQUEST:                  // register request
@@ -195,6 +200,7 @@ void onWireRequest()
       break;
 
     default:
+    /*
       save_i2ccmd[0] = i2c_nextcmd[0];
       save_i2ccmd[1] = i2c_nextcmd[1];
       i2c_nextcmd[0] = 0xFF;
@@ -202,6 +208,9 @@ void onWireRequest()
       Wire.write(i2c_nextcmd, 1);
       i2c_nextcmd[0] = save_i2ccmd[0];
       i2c_nextcmd[1] = save_i2ccmd[1];
+      */
+      
+      state_dbg_re = i2c_state;
       i2c_state = I2C_IDLE;
       test2 |= 128;
   }
@@ -270,11 +279,23 @@ ISR (SPI_STC_vect)
             break;
 
           case 0xF8:
-            spi_out = slask;
+            spi_out = slask_id;
             break;
 
           case 0xF9:
             spi_out = count;
+            break;
+            
+          case 0xFB:
+            spi_out = slask_re;
+            break;
+            
+          case 0xFC:
+            spi_out = state_dbg_wr;
+            break;
+            
+          case 0xFD:
+            spi_out = state_dbg_re;
             break;
 
           case 0xFA:
@@ -293,6 +314,7 @@ ISR (SPI_STC_vect)
 
       case SPI_COMMAND_BYTE:           // Second byte of command sequence
         spi_cmd[1] = spi_in;
+        command_pending = true;
         switch (i2c_state)
         {
           case I2C_REQUEST:
@@ -306,8 +328,7 @@ ISR (SPI_STC_vect)
 
           case I2C_RESPONSE:
             i2c_state = I2C_RESPONSE;
-            command_pending = true;
-            break;
+             break;
 
           case I2C_IDLE:
             save_i2ccmd[0] = i2c_nextcmd[0];
