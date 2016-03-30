@@ -103,15 +103,21 @@ static void onWireReceive(int numBytes)
         if (numBytes == 2)
         {
           test2 |= 2;
-          // Wire.read();
         }
         break;
       }
-      if (start_sampling && !command_pending)
+      if (start_sampling)
       {
         count = 0;
         i2c_nextcmd[0] = count;
         start_sampling = false;
+      }
+      if (command_pending)
+      {
+        save_i2ccmd[0] = i2c_nextcmd[0];
+        save_i2ccmd[1] = i2c_nextcmd[1];
+        i2c_nextcmd[0] = spi_cmd[0];
+        i2c_nextcmd[1] = spi_cmd[1];
       }
       // Check if this is a command or a register request.
       if (i2c_nextcmd[0] > 0xDB)
@@ -129,11 +135,6 @@ static void onWireReceive(int numBytes)
         if (numBytes == 1 && slask_re == 0xFE)
         {
           test2 |= 4;
-          // Check if this is a command or a register request.
-          if (i2c_nextcmd[0] > 0xDB)
-            i2c_state = I2C_COMMAND;
-          else
-            i2c_state = I2C_REQUEST;
         }
         else
         {
@@ -149,18 +150,9 @@ static void onWireReceive(int numBytes)
         i2c_nextcmd[0] = count;
       else
       {
-        save_i2ccmd[0] = 0xFF;
-        i2c_nextcmd[0] = save_i2ccmd[0];
-        //        i2c_nextcmd[1] = 0x00;
+        i2c_nextcmd[0] = 0xFF;
         sample_done = true;
         count = 0;
-      }
-      if (command_pending)
-      {
-        save_i2ccmd[0] = i2c_nextcmd[0];
-        save_i2ccmd[1] = i2c_nextcmd[1];
-        i2c_nextcmd[0] = spi_cmd[0];
-        i2c_nextcmd[1] = spi_cmd[1];
       }
       i2c_state = I2C_IDLE;
       break;
@@ -192,24 +184,12 @@ static void onWireRequest()
         Wire.write(i2c_nextcmd, 2);
         i2c_nextcmd[0] = save_i2ccmd[0];
         i2c_nextcmd[1] = save_i2ccmd[1];
-        //       save_i2ccmd[0] = 0xFF;
-        //       save_i2ccmd[1] = 0x00;
         command_pending = false;
       }
       i2c_state = I2C_IDLE;
       break;
 
     default:
-    /*
-      save_i2ccmd[0] = i2c_nextcmd[0];
-      save_i2ccmd[1] = i2c_nextcmd[1];
-      i2c_nextcmd[0] = 0xFF;
-      i2c_nextcmd[1] = 0x00;
-      Wire.write(i2c_nextcmd, 1);
-      i2c_nextcmd[0] = save_i2ccmd[0];
-      i2c_nextcmd[1] = save_i2ccmd[1];
-      */
-      
       state_dbg_re = i2c_state;
       i2c_state = I2C_IDLE;
       test2 |= 128;
@@ -285,15 +265,15 @@ ISR (SPI_STC_vect)
           case 0xF9:
             spi_out = count;
             break;
-            
+
           case 0xFB:
             spi_out = slask_re;
             break;
-            
+
           case 0xFC:
             spi_out = state_dbg_wr;
             break;
-            
+
           case 0xFD:
             spi_out = state_dbg_re;
             break;
@@ -308,38 +288,19 @@ ISR (SPI_STC_vect)
 
       case SPI_COMMAND:                // First byte of command sequence
         spi_cmd[0] = spi_in;
-        spi_state = SPI_COMMAND_BYTE;
         spi_out = spi_in;
+        if (command_pending)           // Signal that we already have a unhandled command waiting
+          spi_out = 0xFF;
+        spi_state = SPI_COMMAND_BYTE;
         break;
 
       case SPI_COMMAND_BYTE:           // Second byte of command sequence
         spi_cmd[1] = spi_in;
-        command_pending = true;
-        switch (i2c_state)
-        {
-          case I2C_REQUEST:
-          case I2C_COMMAND:
-            save_i2ccmd[0] = i2c_nextcmd[0];
-            save_i2ccmd[1] = i2c_nextcmd[1];
-            i2c_nextcmd[0] = spi_cmd[0];
-            i2c_nextcmd[1] = spi_cmd[1];
-            i2c_state = I2C_COMMAND;
-            break;
-
-          case I2C_RESPONSE:
-            i2c_state = I2C_RESPONSE;
-             break;
-
-          case I2C_IDLE:
-            save_i2ccmd[0] = i2c_nextcmd[0];
-            save_i2ccmd[1] = i2c_nextcmd[1];
-            i2c_nextcmd[0] = spi_cmd[0];
-            i2c_nextcmd[1] = spi_cmd[1];
-            i2c_state = I2C_IDLE;
-            break;
-        }
-        spi_state = SPI_IDLE;
         spi_out = spi_in;
+        if (command_pending)           // Signal that we already have a unhandled command waiting
+          spi_out = 0xFF;
+        command_pending = true;
+        spi_state = SPI_IDLE;
         break;
 
       case SPI_DUMP:                   // Routine for transferring data
