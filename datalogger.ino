@@ -65,8 +65,10 @@ volatile uint8_t *templog = NULL;
 // Debug vars
 static volatile uint8_t *test = NULL;
 static volatile uint8_t test2 = 0;
+static volatile uint8_t test3 = 0;
 static volatile uint8_t slask_id = 0;
-static volatile uint8_t slask_re = 0;
+static volatile uint8_t slask_re1 = 0;
+static volatile uint8_t slask_re2 = 0;
 static volatile I2CState state_dbg_wr = I2C_DEBUG;
 static volatile I2CState state_dbg_re = I2C_DEBUG;
 
@@ -99,11 +101,12 @@ static void onWireReceive(int numBytes)
       slask_id = Wire.read();
       if (numBytes != 1 || slask_id != 0xFE)
       {
+
         test2 |= 1;
+
         if (numBytes == 2)
-        {
           test2 |= 2;
-        }
+
         break;
       }
       if (start_sampling)
@@ -129,24 +132,26 @@ static void onWireReceive(int numBytes)
     case I2C_RESPONSE:
       // Expected address and data bytes.
       // First byte should match what we sent.
-      slask_re = Wire.read();
-      if (numBytes != 2 || slask_re != i2c_nextcmd[0])
+      slask_re1 = Wire.read();
+      if (numBytes != 2 || slask_re1 != i2c_nextcmd[0])
       {
-        if (numBytes == 1 && slask_re == 0xFE)
-        {
+
+        if (numBytes == 1 && slask_re1 == 0xFE)
           test2 |= 4;
-        }
         else
-        {
           test2 |= 8;
-          slask_re = Wire.read();
-          i2c_state = I2C_IDLE;
-        }
+
         break;
       }
-      templog[i2c_nextcmd[0]] = Wire.read();
+      slask_re2 = Wire.read();
+
+      if (slask_re2 == i2c_nextcmd[0])
+        test2 |= 16;
+
+      templog[count] = slask_re2;
       sample_pending = true;
-      if (++count < ARRAY_SIZE)
+      count++;
+      if (count < ARRAY_SIZE)
         i2c_nextcmd[0] = count;
       else
       {
@@ -231,57 +236,63 @@ ISR (SPI_STC_vect)
             spi_out = 0xF0;
             break;
 
-          case 0xF2:
-            spi_out = sample_done;
-            break;
-
-          case 0xF3:
+          case 0xA0:
             spi_out = i2c_state;
             break;
 
-          case 0xF4:
+          case 0xA1:
             test = i2c_nextcmd;
             spi_out = *test;
             break;
 
-          case 0xF5:
+          case 0xA2:
             test = i2c_nextcmd;
             test++;
             spi_out = *test;
             break;
 
-          case 0xF6:
-            spi_out = sample_pending;
-            break;
-
-          case 0xF7:
+          case 0xA3:
             spi_out = test2;
             break;
 
-          case 0xF8:
+          case 0xA4:
+            spi_out = test3;
+            break;
+
+          case 0xA5:
+            spi_out = sample_done;
+            break;
+
+          case 0xA6:
+            spi_out = sample_pending;
+            break;
+
+          case 0xA7:
+            spi_out = start_sampling;
+            break;
+
+          case 0xA8:
             spi_out = slask_id;
             break;
 
-          case 0xF9:
+          case 0xA9:
+            spi_out = slask_re1;
+            break;
+
+          case 0xAA:
+            spi_out = slask_re2;
+            break;
+
+          case 0xAB:
             spi_out = count;
             break;
 
-          case 0xFB:
-            spi_out = slask_re;
-            break;
-
-          case 0xFC:
+          case 0xAC:
             spi_out = state_dbg_wr;
             break;
 
-          case 0xFD:
+          case 0xAD:
             spi_out = state_dbg_re;
-            break;
-
-          case 0xFA:
-            if (!start_sampling)
-              start_sampling = true;
-            spi_out = 0xFA;
             break;
         }
         break;
@@ -326,7 +337,14 @@ ISR (SPI_STC_vect)
           }
         }
         else
+        {
           spi_out = datalog[spi_in];
+          if (spi_out == spi_in)
+          {
+            test2 |= 32;
+            test3++;
+          }
+        }
         break;
     }
   }
