@@ -66,7 +66,8 @@ volatile uint8_t *templog = NULL;
 static volatile uint8_t *test = NULL;
 static volatile uint8_t test2 = 0;
 static volatile uint8_t test3 = 0;
-static volatile uint8_t slask_id = 0;
+static volatile uint8_t slask_id1 = 0;
+static volatile uint8_t slask_id2 = 0;
 static volatile uint8_t slask_re1 = 0;
 static volatile uint8_t slask_re2 = 0;
 static volatile I2CState state_dbg_wr = I2C_DEBUG;
@@ -98,14 +99,16 @@ static void onWireReceive(int numBytes)
   switch (i2c_state) {
     case I2C_IDLE:
       // We expect a single byte.
-      slask_id = Wire.read();
-      if (numBytes != 1 || slask_id != 0xFE)
+      slask_id1 = Wire.read();
+      if (numBytes != 1 || slask_id1 != 0xFE)
       {
 
         test2 |= 1;
 
         if (numBytes == 2)
+        {
           test2 |= 2;
+          slask_id2 = Wire.read();
 
         break;
       }
@@ -272,26 +275,30 @@ ISR (SPI_STC_vect)
             break;
 
           case 0xA8:
-            spi_out = slask_id;
+            spi_out = slask_id1;
             break;
-
+            
           case 0xA9:
-            spi_out = slask_re1;
+            spi_out = slask_id2;
             break;
 
           case 0xAA:
-            spi_out = slask_re2;
+            spi_out = slask_re1;
             break;
 
           case 0xAB:
-            spi_out = count;
+            spi_out = slask_re2;
             break;
 
           case 0xAC:
-            spi_out = state_dbg_wr;
+            spi_out = count;
             break;
 
           case 0xAD:
+            spi_out = state_dbg_wr;
+            break;
+
+          case 0xAE:
             spi_out = state_dbg_re;
             break;
         }
