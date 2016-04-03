@@ -109,7 +109,7 @@ static void onWireReceive(int numBytes)
         {
           test2 |= 2;
           slask_id2 = Wire.read();
-
+        }
         break;
       }
       if (start_sampling)
