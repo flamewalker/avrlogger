@@ -142,8 +142,11 @@ static void onWireReceive(int numBytes)
         if (numBytes == 1 && slask_re1 == 0xFE)
           test2 |= 4;
         else
+        {
           test2 |= 8;
-
+          slask_re2 = Wire.read();
+        }
+        i2c_state = I2C_IDLE;
         break;
       }
       slask_re2 = Wire.read();
