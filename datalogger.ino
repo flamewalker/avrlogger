@@ -138,13 +138,21 @@ static void onWireReceive(int numBytes)
       slask_re1 = Wire.read();
       if (numBytes != 2 || slask_re1 != i2c_nextcmd[0])
       {
-
-        if (numBytes == 1 && slask_re1 == 0xFE)
+        if (numBytes == 2)
+        {
           test2 |= 4;
+          slask_re2 = Wire.read();
+          i2c_state = I2C_IDLE;
+          break;
+        }
         else
         {
-          test2 |= 8;
-          slask_re2 = Wire.read();
+          if (numBytes == 1 && slask_re1 == 0xFE)           // Somehow the master is in I2C_IDLE mode
+          {
+            test2 |= 8;
+            i2c_state = I2C_REQUEST;                        // Better fix it by doing the request again
+            break;
+          }
         }
         i2c_state = I2C_IDLE;
         break;
@@ -171,7 +179,16 @@ static void onWireReceive(int numBytes)
     default:
       test2 |= 64;
       state_dbg_wr = i2c_state;
-      i2c_state = I2C_IDLE;
+      if (numBytes != 1 || Wire.read() != 0xFE)
+      {
+        i2c_state = I2C_IDLE;
+        break;
+      }
+      // Check if this is a command or a register request.
+      if (i2c_nextcmd[0] > 0xDB)
+        i2c_state = I2C_COMMAND;
+      else
+        i2c_state = I2C_REQUEST;
   }
 } // end of I2C-Write from Master
 
@@ -201,9 +218,10 @@ static void onWireRequest()
       break;
 
     default:
-      state_dbg_re = i2c_state;
-      i2c_state = I2C_IDLE;
       test2 |= 128;
+      state_dbg_re = i2c_state;
+      Wire.write("0xFF", 1);
+      i2c_state = I2C_IDLE;
   }
 } // end of I2C-Read from Master
 
@@ -280,7 +298,7 @@ ISR (SPI_STC_vect)
           case 0xA8:
             spi_out = slask_id1;
             break;
-            
+
           case 0xA9:
             spi_out = slask_id2;
             break;
