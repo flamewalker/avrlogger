@@ -34,7 +34,8 @@ enum I2CState
   I2C_IDLE,
   I2C_RESPONSE,
   I2C_REQUEST,
-  I2C_COMMAND
+  I2C_COMMAND,
+  I2C_DEBUG
 };
 
 static volatile I2CState i2c_state = I2C_IDLE;
@@ -64,7 +65,13 @@ volatile uint8_t *templog = NULL;
 // Debug vars
 static volatile uint8_t *test = NULL;
 static volatile uint8_t test2 = 0;
-static volatile uint8_t slask = 0;
+static volatile uint8_t test3 = 0;
+static volatile uint8_t slask_id1 = 0;
+static volatile uint8_t slask_id2 = 0;
+static volatile uint8_t slask_re1 = 0;
+static volatile uint8_t slask_re2 = 0;
+static volatile I2CState state_dbg_wr = I2C_DEBUG;
+static volatile I2CState state_dbg_re = I2C_DEBUG;
 
 // Counter...
 static volatile uint8_t count = 0;
@@ -84,7 +91,7 @@ static volatile boolean sync = false;
 /*
   I2C-Write from Master
 */
-void onWireReceive(int numBytes)
+static void onWireReceive(int numBytes)
 {
   if (!sync)                  // If we got this far, we're in sync!
     sync = true;
@@ -92,14 +99,16 @@ void onWireReceive(int numBytes)
   switch (i2c_state) {
     case I2C_IDLE:
       // We expect a single byte.
-      slask = Wire.read();
-      if (numBytes != 1 || slask != 0xFE)
+      slask_id1 = Wire.read();
+      if (numBytes != 1 || slask_id1 != 0xFE)
       {
+
         test2 |= 1;
+
         if (numBytes == 2)
         {
           test2 |= 2;
-          // Wire.read();
+          slask_id2 = Wire.read();
         }
         break;
       }
@@ -108,6 +117,13 @@ void onWireReceive(int numBytes)
         count = 0;
         i2c_nextcmd[0] = count;
         start_sampling = false;
+      }
+      if (command_pending)
+      {
+        save_i2ccmd[0] = i2c_nextcmd[0];
+        save_i2ccmd[1] = i2c_nextcmd[1];
+        i2c_nextcmd[0] = spi_cmd[0];
+        i2c_nextcmd[1] = spi_cmd[1];
       }
       // Check if this is a command or a register request.
       if (i2c_nextcmd[0] > 0xDB)
@@ -119,58 +135,67 @@ void onWireReceive(int numBytes)
     case I2C_RESPONSE:
       // Expected address and data bytes.
       // First byte should match what we sent.
-      slask = Wire.read();
-      if (numBytes != 2 || slask != i2c_nextcmd[0])
+      slask_re1 = Wire.read();
+      if (numBytes != 2 || slask_re1 != i2c_nextcmd[0])
       {
-        if (numBytes == 1 && slask == 0xFE)
+        if (numBytes == 2)
         {
           test2 |= 4;
-          // Check if this is a command or a register request.
-          if (i2c_nextcmd[0] > 0xDB)
-            i2c_state = I2C_COMMAND;
-          else
-            i2c_state = I2C_REQUEST;
+          slask_re2 = Wire.read();
+          i2c_state = I2C_IDLE;
+          break;
         }
         else
         {
-          test2 |= 8;
-          slask = Wire.read();
-          i2c_state = I2C_IDLE;
+          if (numBytes == 1 && slask_re1 == 0xFE)           // Somehow the master is in I2C_IDLE mode
+          {
+            test2 |= 8;
+            i2c_state = I2C_REQUEST;                        // Better fix it by doing the request again
+            break;
+          }
         }
+        i2c_state = I2C_IDLE;
         break;
       }
-      templog[i2c_nextcmd[0]] = Wire.read();
+      slask_re2 = Wire.read();
+
+      if (slask_re2 == i2c_nextcmd[0])
+        test2 |= 16;
+
+      templog[count] = slask_re2;
       sample_pending = true;
-      if (++count < ARRAY_SIZE)
+      count++;
+      if (count < ARRAY_SIZE)
         i2c_nextcmd[0] = count;
       else
       {
-        save_i2ccmd[0] = 0xFF;
-        i2c_nextcmd[0] = save_i2ccmd[0];
-        //        i2c_nextcmd[1] = 0x00;
+        i2c_nextcmd[0] = 0xFF;
         sample_done = true;
         count = 0;
-      }
-      if (command_pending)
-      {
-        save_i2ccmd[0] = i2c_nextcmd[0];
-        save_i2ccmd[1] = i2c_nextcmd[1];
-        i2c_nextcmd[0] = spi_cmd[0];
-        i2c_nextcmd[1] = spi_cmd[1];
       }
       i2c_state = I2C_IDLE;
       break;
 
     default:
       test2 |= 64;
-      i2c_state = I2C_IDLE;
+      state_dbg_wr = i2c_state;
+      if (numBytes != 1 || Wire.read() != 0xFE)
+      {
+        i2c_state = I2C_IDLE;
+        break;
+      }
+      // Check if this is a command or a register request.
+      if (i2c_nextcmd[0] > 0xDB)
+        i2c_state = I2C_COMMAND;
+      else
+        i2c_state = I2C_REQUEST;
   }
 } // end of I2C-Write from Master
 
 /*
   I2C-Read from Master
 */
-void onWireRequest()
+static void onWireRequest()
 {
   switch (i2c_state) {
     case I2C_REQUEST:                  // register request
@@ -187,23 +212,16 @@ void onWireRequest()
         Wire.write(i2c_nextcmd, 2);
         i2c_nextcmd[0] = save_i2ccmd[0];
         i2c_nextcmd[1] = save_i2ccmd[1];
-        //       save_i2ccmd[0] = 0xFF;
-        //       save_i2ccmd[1] = 0x00;
         command_pending = false;
       }
       i2c_state = I2C_IDLE;
       break;
 
     default:
-      save_i2ccmd[0] = i2c_nextcmd[0];
-      save_i2ccmd[1] = i2c_nextcmd[1];
-      i2c_nextcmd[0] = 0xFF;
-      i2c_nextcmd[1] = 0x00;
-      Wire.write(i2c_nextcmd, 1);
-      i2c_nextcmd[0] = save_i2ccmd[0];
-      i2c_nextcmd[1] = save_i2ccmd[1];
-      i2c_state = I2C_IDLE;
       test2 |= 128;
+      state_dbg_re = i2c_state;
+      Wire.write("0xFF", 1);
+      i2c_state = I2C_IDLE;
   }
 } // end of I2C-Read from Master
 
@@ -242,83 +260,86 @@ ISR (SPI_STC_vect)
             spi_out = 0xF0;
             break;
 
-          case 0xF2:
-            spi_out = sample_done;
-            break;
-
-          case 0xF3:
+          case 0xA0:
             spi_out = i2c_state;
             break;
 
-          case 0xF4:
+          case 0xA1:
             test = i2c_nextcmd;
             spi_out = *test;
             break;
 
-          case 0xF5:
+          case 0xA2:
             test = i2c_nextcmd;
             test++;
             spi_out = *test;
             break;
 
-          case 0xF6:
-            spi_out = sample_pending;
-            break;
-
-          case 0xF7:
+          case 0xA3:
             spi_out = test2;
             break;
 
-          case 0xF8:
-            spi_out = slask;
+          case 0xA4:
+            spi_out = test3;
             break;
 
-          case 0xF9:
+          case 0xA5:
+            spi_out = sample_done;
+            break;
+
+          case 0xA6:
+            spi_out = sample_pending;
+            break;
+
+          case 0xA7:
+            spi_out = start_sampling;
+            break;
+
+          case 0xA8:
+            spi_out = slask_id1;
+            break;
+
+          case 0xA9:
+            spi_out = slask_id2;
+            break;
+
+          case 0xAA:
+            spi_out = slask_re1;
+            break;
+
+          case 0xAB:
+            spi_out = slask_re2;
+            break;
+
+          case 0xAC:
             spi_out = count;
             break;
 
-          case 0xFA:
-            if (!start_sampling)
-              start_sampling = true;
-            spi_out = 0xFA;
+          case 0xAD:
+            spi_out = state_dbg_wr;
+            break;
+
+          case 0xAE:
+            spi_out = state_dbg_re;
             break;
         }
         break;
 
       case SPI_COMMAND:                // First byte of command sequence
         spi_cmd[0] = spi_in;
-        spi_state = SPI_COMMAND_BYTE;
         spi_out = spi_in;
+        if (command_pending)           // Signal that we already have a unhandled command waiting
+          spi_out = 0xFF;
+        spi_state = SPI_COMMAND_BYTE;
         break;
 
       case SPI_COMMAND_BYTE:           // Second byte of command sequence
         spi_cmd[1] = spi_in;
-        switch (i2c_state)
-        {
-          case I2C_REQUEST:
-          case I2C_COMMAND:
-            save_i2ccmd[0] = i2c_nextcmd[0];
-            save_i2ccmd[1] = i2c_nextcmd[1];
-            i2c_nextcmd[0] = spi_cmd[0];
-            i2c_nextcmd[1] = spi_cmd[1];
-            i2c_state = I2C_COMMAND;
-            break;
-
-          case I2C_RESPONSE:
-            i2c_state = I2C_RESPONSE;
-            command_pending = true;
-            break;
-
-          case I2C_IDLE:
-            save_i2ccmd[0] = i2c_nextcmd[0];
-            save_i2ccmd[1] = i2c_nextcmd[1];
-            i2c_nextcmd[0] = spi_cmd[0];
-            i2c_nextcmd[1] = spi_cmd[1];
-            i2c_state = I2C_IDLE;
-            break;
-        }
-        spi_state = SPI_IDLE;
         spi_out = spi_in;
+        if (command_pending)           // Signal that we already have a unhandled command waiting
+          spi_out = 0xFF;
+        command_pending = true;
+        spi_state = SPI_IDLE;
         break;
 
       case SPI_DUMP:                   // Routine for transferring data
@@ -344,7 +365,14 @@ ISR (SPI_STC_vect)
           }
         }
         else
+        {
           spi_out = datalog[spi_in];
+          if (spi_out == spi_in)
+          {
+            test2 |= 32;
+            test3++;
+          }
+        }
         break;
     }
   }
