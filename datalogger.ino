@@ -34,15 +34,14 @@ enum I2CState
   I2C_IDLE,
   I2C_RESPONSE,
   I2C_REQUEST,
-  I2C_COMMAND,
-  I2C_DEBUG
+  I2C_COMMAND
 };
 
 static volatile I2CState i2c_state = I2C_IDLE;
 
 // Command buffer for I2C ISR
 static uint8_t i2c_nextcmd[2] = { 0xDE, 0x01 };    // Preload with command to signal Modem = OK , SMS = 1  For some reason this cannot be volatile, problem with Wire library
-static volatile uint8_t *save_i2ccmd;
+static uint8_t *save_i2ccmd;
 
 // State machine declarations for SPI
 enum SPIState
@@ -56,22 +55,16 @@ enum SPIState
 static volatile SPIState spi_state = SPI_IDLE;
 
 // Command buffer for SPI ISR
-static volatile uint8_t spi_cmd[2] = { 0xFF, 0x00 };
+static uint8_t spi_cmd[2] = { 0xFF, 0x00 };
 
 // Pointer init, later use point to arrays for store of values
 volatile uint8_t *datalog = NULL;
 volatile uint8_t *templog = NULL;
 
 // Debug vars
-static volatile uint8_t *test = NULL;
-static volatile uint8_t test2 = 0;
-static volatile uint8_t test3 = 0;
-static volatile uint8_t slask_id1 = 0;
-static volatile uint8_t slask_id2 = 0;
-static volatile uint8_t slask_re1 = 0;
-static volatile uint8_t slask_re2 = 0;
-static volatile I2CState state_dbg_wr = I2C_DEBUG;
-static volatile I2CState state_dbg_re = I2C_DEBUG;
+static volatile uint8_t test2, test3, slask_id1, slask_id2, slask_re1, slask_re2 = 0;
+static volatile uint8_t state_dbg_wr = 4;
+static volatile uint8_t state_dbg_re = 4;
 
 // Counter...
 static volatile uint8_t count = 0;
@@ -265,14 +258,11 @@ ISR (SPI_STC_vect)
             break;
 
           case 0xA1:
-            test = i2c_nextcmd;
-            spi_out = *test;
+            spi_out = i2c_nextcmd[0];
             break;
 
           case 0xA2:
-            test = i2c_nextcmd;
-            test++;
-            spi_out = *test;
+            spi_out = i2c_nextcmd[1];
             break;
 
           case 0xA3:
@@ -321,6 +311,17 @@ ISR (SPI_STC_vect)
 
           case 0xAE:
             spi_out = state_dbg_re;
+            break;
+            
+          case 0xAF:
+            test2 = 0;
+            test3 = 0;
+            slask_id1 = 0;
+            slask_id2 = 0;
+            slask_re1 = 0;
+            slask_re2 = 0;
+            state_dbg_wr = 4;
+            state_dbg_re = 4;
             break;
         }
         break;
