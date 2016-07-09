@@ -5,7 +5,9 @@
 
 #include <DallasTemperature.h>
 #include <OneWire.h>
-#include <Wire.h>
+
+// TWI buffer length
+#define TWI_BUFFER_LENGTH 4
 
 // Max size of data array
 #define ARRAY_SIZE 0xAF
@@ -28,20 +30,9 @@ int8_t temperaturearray[20];
 unsigned long lastTempRequest = 0;
 unsigned int delayInMillis = 750;
 
-// State machine declarations for I2C
-enum I2CState
-{
-  I2C_IDLE,
-  I2C_RESPONSE,
-  I2C_REQUEST,
-  I2C_COMMAND
-};
-
-static volatile I2CState i2c_state = I2C_IDLE;
-
 // Command buffer for I2C ISR
-static uint8_t i2c_nextcmd[2] = { 0xDE, 0x01 };    // Preload with command to signal Modem = OK , SMS = 1  For some reason this cannot be volatile, problem with Wire library
-static uint8_t *save_i2ccmd;
+static volatile uint8_t i2c_nextcmd[2] = { 0xDE, 0x01 };    // Preload with command to signal Modem = OK , SMS = 1  For some reason this cannot be volatile, problem with Wire library
+static volatile uint8_t save_i2ccmd[2];
 
 // State machine declarations for SPI
 enum SPIState
@@ -55,16 +46,14 @@ enum SPIState
 static volatile SPIState spi_state = SPI_IDLE;
 
 // Command buffer for SPI ISR
-static uint8_t spi_cmd[2] = { 0xFF, 0x00 };
+static volatile uint8_t spi_cmd[2] = { 0xFF, 0x00 };
 
 // Pointer init, later use point to arrays for store of values
 volatile uint8_t *datalog = NULL;
 volatile uint8_t *templog = NULL;
 
 // Debug vars
-static volatile uint8_t test2, test3, slask_id1, slask_id2, slask_re1, slask_re2 = 0;
-static volatile uint8_t state_dbg_wr = 4;
-static volatile uint8_t state_dbg_re = 4;
+static volatile uint8_t test1, test2, test3, test4, test5, test6, test7, test8, slask_tx1, slask_tx2, slask_rx1, slask_rx2 = 0;
 
 // Counter...
 static volatile uint8_t count = 0;
@@ -81,304 +70,327 @@ static volatile boolean start_sampling = false;
 static volatile boolean first_sync = false;
 static volatile boolean sync = false;
 
+// TWI vars
+static volatile uint8_t twi_txBuffer[TWI_BUFFER_LENGTH];
+static volatile uint8_t twi_txBufferIndex;
+static volatile uint8_t twi_txBufferLength;
+
+static volatile uint8_t twi_rxBuffer[TWI_BUFFER_LENGTH];
+static volatile uint8_t twi_rxBufferIndex;
+
 /*
-  I2C-Write from Master
+  TWI ISR
 */
-static void onWireReceive(int numBytes)
+ISR (TWI_vect)
 {
-  if (!sync)                  // If we got this far, we're in sync!
-    sync = true;
-
-  switch (i2c_state) {
-    case I2C_IDLE:
-      // We expect a single byte.
-      slask_id1 = Wire.read();
-      if (numBytes != 1 || slask_id1 != 0xFE)
-      {
-
-        test2 |= 1;
-
-        if (numBytes == 2)
-        {
-          test2 |= 2;
-          slask_id2 = Wire.read();
-        }
-        break;
-      }
-      if (start_sampling)
-      {
-        count = 0;
-        i2c_nextcmd[0] = count;
-        start_sampling = false;
-      }
-      if (command_pending)
-      {
-        save_i2ccmd[0] = i2c_nextcmd[0];
-        save_i2ccmd[1] = i2c_nextcmd[1];
-        i2c_nextcmd[0] = spi_cmd[0];
-        i2c_nextcmd[1] = spi_cmd[1];
-      }
-      // Check if this is a command or a register request.
-      if (i2c_nextcmd[0] > 0xDB)
-        i2c_state = I2C_COMMAND;
-      else
-        i2c_state = I2C_REQUEST;
+  switch (TWSR & ((1 << TWS7) | (1 << TWS6) | (1 << TWS5) | (1 << TWS4) | (1 << TWS3)))
+  {
+    // Status Codes for SLAVE RECEIVER mode
+    case 0x60:          // Own SLA+W has been received; ACK has been returned
+    case 0x68:          // Arbitration lost in SLA+R/W as Master; own SLA+W has been received; ACK has been returned
+    case 0x70:          // General call address has been received; ACK has been returned
+    case 0x78:          // Arbitration lost in SLA+R/W as Master; General call address has been received; ACK has been returned
+      // Reset rx buffer index
+      twi_rxBufferIndex = 0;
+      // ACK will be returned
+      TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT) | (1 << TWEA);
       break;
 
-    case I2C_RESPONSE:
-      // Expected address and data bytes.
-      // First byte should match what we sent.
-      slask_re1 = Wire.read();
-      if (numBytes != 2 || slask_re1 != i2c_nextcmd[0])
+    case 0x80:          // Previously addressed with own SLA+W; data has been received; ACK has been returned
+    case 0x90:          // Previously addressed with general call; data has been received; ACK has been returned
+      // Check if there is room in the buffer
+      if (twi_rxBufferIndex < TWI_BUFFER_LENGTH)
       {
-        if (numBytes == 2)
+        // Put received byte in buffer
+        twi_rxBuffer[twi_rxBufferIndex++] = TWDR;
+        // ACK will be returned
+        TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT) | (1 << TWEA);
+      }
+      else
+      {
+        // No room, NOT ACK will be returned
+        test2 |= 2;   // Debug
+        TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
+      }
+      break;
+
+    case 0x88:          // Previously addressed with own SLA+W; data has been received; NOT ACK has been returned
+    case 0x98:          // Previously addressed with general call; data has been received; NOT ACK has been returned
+      test2 |= 4;   // Debug
+      // NOT ACK will be returned
+      TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
+      break;
+
+    case 0xA0:          // A STOP condition or repeated START condition has been received while still addressed as Slave
+      // Release bus, ACK will be returned
+      TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT) | (1 << TWEA);
+      // Add a NULL char after data, if possible
+      if (twi_rxBufferIndex < TWI_BUFFER_LENGTH)
+        twi_rxBuffer[twi_rxBufferIndex] = '\0';
+
+      // Handle the data we got in the buffer ------>
+      if (twi_rxBufferIndex == 1 && twi_rxBuffer[0] == 0xFE)
+      {
+        if (!sync)                  // If we got this far, we're in sync!
+          sync = true;
+        if (start_sampling)
         {
-          test2 |= 4;
-          slask_re2 = Wire.read();
-          i2c_state = I2C_IDLE;
-          break;
+          count = 0;
+          i2c_nextcmd[0] = count;
+          start_sampling = false;
         }
+        if (command_pending)
+        {
+          save_i2ccmd[0] = i2c_nextcmd[0];
+          save_i2ccmd[1] = i2c_nextcmd[1];
+          i2c_nextcmd[0] = spi_cmd[0];
+          i2c_nextcmd[1] = spi_cmd[1];
+        }
+      }
+      else if (twi_rxBufferIndex == 2 && twi_rxBuffer[0] == i2c_nextcmd[0])
+      {
+        templog[count] = twi_rxBuffer[1];
+        sample_pending = true;
+        count++;
+        if (count < ARRAY_SIZE)
+          i2c_nextcmd[0] = count;
         else
         {
-          if (numBytes == 1 && slask_re1 == 0xFE)           // Somehow the master is in I2C_IDLE mode
-          {
-            test2 |= 8;
-            i2c_state = I2C_REQUEST;                        // Better fix it by doing the request again
-            break;
-          }
+          i2c_nextcmd[0] = 0xFF;
+          sample_done = true;
+          count = 0;
         }
-        i2c_state = I2C_IDLE;
-        break;
       }
-      slask_re2 = Wire.read();
-
-      if (slask_re2 == i2c_nextcmd[0])
-        test2 |= 16;
-
-      templog[count] = slask_re2;
-      sample_pending = true;
-      count++;
-      if (count < ARRAY_SIZE)
-        i2c_nextcmd[0] = count;
-      else
-      {
-        i2c_nextcmd[0] = 0xFF;
-        sample_done = true;
-        count = 0;
-      }
-      i2c_state = I2C_IDLE;
+      twi_rxBufferIndex = 0;
       break;
 
-    default:
-      test2 |= 64;
-      state_dbg_wr = i2c_state;
-      if (numBytes != 1 || Wire.read() != 0xFE)
-      {
-        i2c_state = I2C_IDLE;
-        break;
-      }
-      // Check if this is a command or a register request.
-      if (i2c_nextcmd[0] > 0xDB)
-        i2c_state = I2C_COMMAND;
-      else
-        i2c_state = I2C_REQUEST;
-  }
-} // end of I2C-Write from Master
+    // Status Codes for SLAVE TRANSMITTER mode
+    case 0xA8:          // Own SLA+R has been received; ACK has been returned
+    case 0xB0:          // Arbitration lost in SLA+R/W as Master; own SLA+R has been received; ACK has been returned
+      twi_txBufferIndex = 0;
+      twi_txBufferLength = 0;
 
-/*
-  I2C-Read from Master
-*/
-static void onWireRequest()
-{
-  switch (i2c_state) {
-    case I2C_REQUEST:                  // register request
-      Wire.write(i2c_nextcmd, 1);
-      i2c_state = I2C_RESPONSE;
-      break;
+      // Prepare data to send ------->
 
-    case I2C_COMMAND:
       // No-op/ping is a single byte.
-      if (i2c_nextcmd[0] == 0xFF)
-        Wire.write(i2c_nextcmd, 1);
+      if (i2c_nextcmd[0] == 0xFF || i2c_nextcmd[0] < 0xDC)
+      {
+        twi_txBufferLength = 1;
+        twi_txBuffer[0] = i2c_nextcmd[0];
+      }
       else
       {
-        Wire.write(i2c_nextcmd, 2);
+        twi_txBufferLength = 2;
+        twi_txBuffer[0] = i2c_nextcmd[0];
+        twi_txBuffer[1] = i2c_nextcmd[1];
         i2c_nextcmd[0] = save_i2ccmd[0];
         i2c_nextcmd[1] = save_i2ccmd[1];
         command_pending = false;
       }
-      i2c_state = I2C_IDLE;
+      if (twi_txBufferLength == 0)
+      {
+        test2 |= 8;   // Debug
+        twi_txBufferLength = 1;
+        twi_txBuffer[0] = 0xFF;
+      }
+    // Load TWDR with first byte to send in next step
+
+    case 0xB8:          // Data byte in TWDR has been transmitted; ACK has been received
+      // Load TWDR with byte to send from buffer
+      TWDR = twi_txBuffer[twi_txBufferIndex++];
+      // Check if there is more bytes to send
+      if (twi_txBufferIndex < twi_txBufferLength)
+        // ACK will be returned if there is more to send
+        TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT) | (1 << TWEA);
+      else
+        // NOT ACK will be returned
+        TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
+      break;
+
+    case 0xC0:          // Data byte in TWDR has been transmitted; NOT ACK has been received
+    case 0xC8:          // Last data byte in TWDR has been transmitted (TWEA = "0"); ACK has been received
+      // ACK will be returned
+      TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT) | (1 << TWEA);
+      break;
+
+    // TWI Errors
+    case 0xF8:          // No relevant state information available; TWINT = "0"
+      test2 |= 32;    // Debug
+      break;
+
+    case 0x00:          // Bus Error due to an illegal START or STOP condition
+      test1++;                        // Debug
+      test2 |= 64;                    // Debug
+      slask_rx1 = twi_rxBuffer[0];    // Debug
+      slask_rx2 = twi_rxBuffer[1];    // Debug
+      slask_tx1 = twi_txBuffer[0];    // Debug
+      slask_tx2 = twi_txBuffer[1];    // Debug
+      // Release bus and reset TWI hardware
+      TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT) | (1 << TWEA) | (1 << TWSTO);
       break;
 
     default:
-      test2 |= 128;
-      state_dbg_re = i2c_state;
-      Wire.write("0xFF", 1);
-      i2c_state = I2C_IDLE;
+      test2 |= 128;                   // Debug
   }
-} // end of I2C-Read from Master
+}  // end of TWI ISR
 
 /*
   SPI ISR
 */
 ISR (SPI_STC_vect)
 {
-  // Collect byte sent from MASTER
-  uint8_t spi_in = SPDR;
-  // Preload response to MASTER
-  uint8_t spi_out = spi_in;
-
-  // set status report output
+  // Set status report output
   if (!sync)
-    spi_out = 0x00;                       // Not in sync with I2C master yet
-  else {
-    if (!new_sample_available)
-      spi_out = 0x01;                     // In sync with I2C master, no new sample available
-
-    switch (spi_state) {
+    SPDR = 0x00;                       // Not in sync with I2C master yet
+  else
+  {
+    switch (spi_state)
+    {
       case SPI_IDLE:
-        switch (spi_in) {
+        switch (SPDR)
+        {
           case 0xFF:                   // NO-OP / PING
+            if (!new_sample_available)
+              SPDR = 0x01;                     // In sync with I2C master, no new sample available
+            else
+              SPDR = 0xFF;
             break;
 
           case 0xF1:                   // Start command sequence to I2C master
             spi_state = SPI_COMMAND;
-            spi_out = 0xF1;
+            SPDR = 0xF1;
             break;
 
           case 0xF0:                   // Start transferring array
             if (!new_sample_available)
-              break;
-            spi_state = SPI_DUMP;
-            spi_out = 0xF0;
+              SPDR = 0x01;
+            else
+            {
+              spi_state = SPI_DUMP;
+              SPDR = 0xF0;
+            }
+            break;
+
+          case 0xF2:                  //  Release bus and reset TWI hardware
+            TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT) | (1 << TWEA) | (1 << TWSTO);
+            SPDR = 0xF2;
             break;
 
           case 0xA0:
-            spi_out = i2c_state;
+            SPDR = test1;
             break;
 
           case 0xA1:
-            spi_out = i2c_nextcmd[0];
+            SPDR = test2;
             break;
 
           case 0xA2:
-            spi_out = i2c_nextcmd[1];
+            SPDR = test3;
             break;
 
           case 0xA3:
-            spi_out = test2;
+            SPDR = count;
             break;
 
           case 0xA4:
-            spi_out = test3;
+            SPDR = twi_rxBuffer[0];
             break;
 
           case 0xA5:
-            spi_out = sample_done;
+            SPDR = twi_rxBuffer[1];
             break;
 
           case 0xA6:
-            spi_out = sample_pending;
+            SPDR = twi_txBuffer[0];
             break;
 
           case 0xA7:
-            spi_out = start_sampling;
+            SPDR = twi_txBuffer[1];
             break;
 
           case 0xA8:
-            spi_out = slask_id1;
+            SPDR = slask_rx1;
             break;
 
           case 0xA9:
-            spi_out = slask_id2;
+            SPDR = slask_rx2;
             break;
 
           case 0xAA:
-            spi_out = slask_re1;
+            SPDR = slask_tx1;
             break;
 
           case 0xAB:
-            spi_out = slask_re2;
+            SPDR = slask_tx2;
             break;
 
-          case 0xAC:
-            spi_out = count;
-            break;
-
-          case 0xAD:
-            spi_out = state_dbg_wr;
-            break;
-
-          case 0xAE:
-            spi_out = state_dbg_re;
-            break;
-            
           case 0xAF:
+            test1 = 0;
             test2 = 0;
             test3 = 0;
-            slask_id1 = 0;
-            slask_id2 = 0;
-            slask_re1 = 0;
-            slask_re2 = 0;
-            state_dbg_wr = 4;
-            state_dbg_re = 4;
+            test4 = 0;
+            slask_tx1 = 0;
+            slask_tx2 = 0;
+            slask_rx1 = 0;
+            slask_rx2 = 0;
+            SPDR = 0xAF;
             break;
         }
         break;
 
       case SPI_COMMAND:                // First byte of command sequence
-        spi_cmd[0] = spi_in;
-        spi_out = spi_in;
+        spi_cmd[0] = SPDR;
         if (command_pending)           // Signal that we already have a unhandled command waiting
-          spi_out = 0xFF;
+          SPDR = 0xFF;
         spi_state = SPI_COMMAND_BYTE;
         break;
 
       case SPI_COMMAND_BYTE:           // Second byte of command sequence
-        spi_cmd[1] = spi_in;
-        spi_out = spi_in;
+        spi_cmd[1] = SPDR;
         if (command_pending)           // Signal that we already have a unhandled command waiting
-          spi_out = 0xFF;
+          SPDR = 0xFF;
         command_pending = true;
         spi_state = SPI_IDLE;
         break;
 
       case SPI_DUMP:                   // Routine for transferring data
-        if (spi_in == 0xFF)            // NO-OP / PING
-          break;
-        if (spi_in == 0xFE)            // Signal which blocks has changed
+        if (SPDR < 0xAD)           // Changed to 0xAD in ver 0.8.4, only send up to CURRENT
         {
-          spi_out = sample_send;
+          SPDR = datalog[SPDR];
           break;
-        }
-        if (spi_in >= 0xAD)           // Changed to 0xAD in ver 0.8.4, only send up to CURRENT
-        {
-          if (spi_in >= 0xB0 && spi_in <= 0xBF)
-          {
-            spi_out = temperaturearray[spi_in - 0xB0];
-          }
-          else
-          {
-            sample_send = 0;
-            new_sample_available = false;
-            spi_state = SPI_IDLE;
-            break;
-          }
         }
         else
         {
-          spi_out = datalog[spi_in];
-          if (spi_out == spi_in)
+          if (SPDR >= 0xB0 && SPDR <= 0xBF)
           {
-            test2 |= 32;
-            test3++;
+            SPDR = temperaturearray[SPDR - 0xB0];
+            break;
+          }
+          else
+          {
+            if (SPDR == 0xFF)          // NO-OP / PING
+            {
+              SPDR = 0xFF;
+              break;
+            }
+            if (SPDR == 0xFE)            // Signal which blocks has changed
+            {
+              SPDR = sample_send;
+              break;
+            }
+            if (SPDR == 0xAD)
+            {
+              new_sample_available = false;
+              spi_state = SPI_IDLE;
+              SPDR = test4;
+              test4 = 0;
+              break;
+            }
           }
         }
         break;
     }
   }
-  // Next byte to send to MASTER
-  SPDR = spi_out;
 } // end of SPI ISR
 
 void checkforchange(uint8_t x_start , uint8_t x_stop , uint8_t block)
@@ -398,7 +410,6 @@ void setup()
   // Declare arrays to store samples in, no error checking... I KNOW...
   datalog = static_cast<uint8_t*>(calloc(ARRAY_SIZE, sizeof(uint8_t)));
   templog = static_cast<uint8_t*>(calloc(ARRAY_SIZE, sizeof(uint8_t)));
-  save_i2ccmd = static_cast<uint8_t*>(calloc(2, sizeof(uint8_t)));
 
   // Initialize OneWire sensors
   sensors.begin();
@@ -408,14 +419,23 @@ void setup()
   sensors.requestTemperatures();
   lastTempRequest = millis();
 
-  // Port D7 output, sample_ready signal
-  DDRD |= (1 << DDD7);
+  // Initialize ports
+  // Set Port B1, B0 output
+  DDRB |= (1 << DDB1) | (1 << DDB0);
 
-  // Set MISO output
+  // Set Port C0, C1, C2, C3 analog input
+  DDRC |= (0 << DDC3) | (0 << DDC2) | (0 << DDC1) | (0 << DDC0);
+  DIDR0 |= (1 << ADC3D) | (1 << ADC2D) | (1 << ADC1D) | (1 << ADC0D);
+
+  // Set Port D7, D6 output, sample_ready signal
+  DDRD |= (1 << DDD7) | (1 << DDD6);
+
+  // Initialize all the interfaces
+  // SPI slave interface to Raspberry Pi
+  // Set Port B4 output, SPI MISO
   DDRB |= (1 << DDB4);
 
-  // Interrupt enabled, SPI enabled, MSB first, Slave, CLK low when idle,
-  // Sample on leading edge of CLK
+  // Interrupt enabled, SPI enabled, MSB first, Slave, CLK low when idle, Sample on leading edge of CLK (SPI Mode 0)
   SPCR = (1 << SPIE) | (1 << SPE);
 
   // Clear the registers
@@ -423,26 +443,49 @@ void setup()
   clr = SPDR;
   SPDR = 0x00;
 
-  // Enable I2C in slave mode
-  Wire.begin(0x5C);               // slave address
-  Wire.onReceive(onWireReceive);  // ISR for I2C-Write
-  Wire.onRequest(onWireRequest);  // ISR for I2C-Read
+  // Initialize USART0 as SPI Master interface to digital potentiometer
+  UBRR0 = 0;
 
+  // Set Port D4 output, Port D5 output: SPI CLK, SS
+  DDRD |= (1 << DDD4) | (1 << DDD5);
+
+  // Enable USART0 SPI Master Mode, MSB first, CLK low when idle, Sample on trailing edge of CLK (Mode 1)
+  UCSR0C = (1 << UMSEL01) | (1 << UMSEL00) | (1 << UCPHA0) | (0 << UCPOL0);
+
+  // Enable USART0 SPI Master Mode receiver and transmitter
+  UCSR0B = (1 << RXEN0) | (1 << TXEN0);
+
+  // Set baud rate to 4Mbps
+  UBRR0 = 1;
+
+  // Clear the registers
+  clr = UCSR0A;
+  clr = UDR0;
+
+  // TWI slave interface to CTC EcoLogic EXT
+  // Enable internal pullup for TWI pins (Could be removed when real pullups have been fitted)
+  PORTC |= (1 << PC4) | (1 << PC5);
+
+  // Set the slave address
+  TWAR = 0x5C << 1;
+
+  // Enable TWI module, acks and interrupt
+  TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWEA);
 } // end of setup
 
 void loop()
 {
   // Set the sync and sample_done LED with the state of the variable:
-  if (sync)
+  if (sync && !first_sync)
   {
-    if (!first_sync && i2c_state == I2C_IDLE)   // Check if this is First contact, then enable autologging, do not alert the Federation...
-    {
-      start_sampling = true;                    // Start the auto-sampling!
-      first_sync = true;
-    }
+    //    if (!first_sync)   // Check if this is First contact, then enable autologging, do not alert the Federation...
+    //    {
+    start_sampling = true;                    // Start the auto-sampling!
+    first_sync = true;
+    //    }
   }
-  else
-    first_sync = false;
+  //  else
+  //    first_sync = false;
 
   if (millis() - lastTempRequest >= delayInMillis)
   {
@@ -457,8 +500,9 @@ void loop()
   }
 
   // Start checking the status of the newly taken sample versus the last sent
-  if (sample_done && i2c_state == I2C_IDLE)
+  if (sample_done)
   {
+    sample_send = 0;
     // Check for change in SYSTIME, normal every minute
     checkforchange(0x73 , 0x75 , B00000001);
 
@@ -488,7 +532,8 @@ void loop()
 
     sample_done = false;
     sample_pending = false;
-    start_sampling = true;       // Go for another auto sample!
+    start_sampling = true;      // Go for another auto sample!
+    test4++;                    // Increment the sample counter
   }
   if (new_sample_available)
     PORTD |= (1 << PORTD7);      // Set the interrupt line HIGH
