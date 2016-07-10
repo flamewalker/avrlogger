@@ -68,7 +68,6 @@ static volatile boolean sample_done = false;
 static volatile boolean new_sample_available = false;
 static volatile uint8_t sample_send = B01111111;
 static volatile boolean command_pending = false;
-static volatile boolean sample_pending = false;
 static volatile boolean start_sampling = false;
 
 // Flags for contact with CTC Ecologic EXT
@@ -140,7 +139,6 @@ ISR (TWI_vect)
           sync = true;
         if (start_sampling)
         {
-          count = 0;
           i2c_nextcmd[0] = count;
           start_sampling = false;
         }
@@ -154,16 +152,13 @@ ISR (TWI_vect)
       }
       else if (twi_rxBufferIndex == 2 && twi_rxBuffer[0] == i2c_nextcmd[0])
       {
-        templog[count] = twi_rxBuffer[1];
-        sample_pending = true;
-        count++;
+        templog[count++] = twi_rxBuffer[1];
         if (count < SAMPLE_SIZE)
           i2c_nextcmd[0] = count;
         else
         {
           i2c_nextcmd[0] = 0xFF;
           sample_done = true;
-          count = 0;
         }
       }
       twi_rxBufferIndex = 0;
@@ -468,17 +463,12 @@ void setup()
 
 void loop()
 {
-  // Set the sync and sample_done LED with the state of the variable:
+  // Check if we are in sync with the CTC master and if we can start the sampling
   if (sync && !first_sync)
   {
-    //    if (!first_sync)   // Check if this is First contact, then enable autologging, do not alert the Federation...
-    //    {
     start_sampling = true;                    // Start the auto-sampling!
     first_sync = true;
-    //    }
   }
-  //  else
-  //    first_sync = false;
 
   if (millis() - lastTempRequest >= delayInMillis)
   {
@@ -505,7 +495,10 @@ void loop()
   // Start checking the status of the newly taken sample versus the last sent
   if (sample_done)
   {
+    sample_done = false;
     sample_send = 0;
+    count = 0;
+    
     // Check for change in SYSTIME, normal every minute
     checkforchange(0x73 , 0x75 , B00000001);
 
@@ -533,8 +526,6 @@ void loop()
     checkforchange(0x9A , 0x9A , B01000000);
     checkforchange(0xA5 , 0xA7 , B01000000);
 
-    sample_done = false;
-    sample_pending = false;
     start_sampling = true;      // Go for another auto sample!
     test4++;                    // Increment the sample counter
   }
