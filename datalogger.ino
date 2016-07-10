@@ -9,8 +9,12 @@
 // TWI buffer length
 #define TWI_BUFFER_LENGTH 4
 
-// Max size of data array
-#define ARRAY_SIZE 0xAF
+// Array sizes
+#define ARRAY_SIZE 0xB0 + NUM_SENSORS * 2
+#define SAMPLE_SIZE 0xAD
+
+// Number of OneWire sensors
+#define NUM_SENSORS 1
 
 // Data wire is plugged into port 2 on the Arduino
 #define ONE_WIRE_BUS 2
@@ -26,7 +30,8 @@ DeviceAddress tempDeviceAddress;
 
 // Variables for handling sampling from OneWire sensors
 float temperature = 0.0;
-int8_t temperaturearray[20];
+float averagetemp = 0.0;
+uint8_t num_avg = 0;
 unsigned long lastTempRequest = 0;
 unsigned int delayInMillis = 750;
 
@@ -48,9 +53,9 @@ static volatile SPIState spi_state = SPI_IDLE;
 // Command buffer for SPI ISR
 static volatile uint8_t spi_cmd[2] = { 0xFF, 0x00 };
 
-// Pointer init, later use point to arrays for store of values
-volatile uint8_t *datalog = NULL;
-volatile uint8_t *templog = NULL;
+// Init the arrays for storage
+static volatile uint8_t datalog[ARRAY_SIZE];
+static volatile uint8_t templog[ARRAY_SIZE];
 
 // Debug vars
 static volatile uint8_t test1, test2, test3, test4, test5, test6, test7, test8, slask_tx1, slask_tx2, slask_rx1, slask_rx2 = 0;
@@ -152,7 +157,7 @@ ISR (TWI_vect)
         templog[count] = twi_rxBuffer[1];
         sample_pending = true;
         count++;
-        if (count < ARRAY_SIZE)
+        if (count < SAMPLE_SIZE)
           i2c_nextcmd[0] = count;
         else
         {
@@ -354,38 +359,30 @@ ISR (SPI_STC_vect)
         break;
 
       case SPI_DUMP:                   // Routine for transferring data
-        if (SPDR < 0xAD)           // Changed to 0xAD in ver 0.8.4, only send up to CURRENT
+        if (SPDR < ARRAY_SIZE)           // Changed to 0xAD in ver 0.8.4, only send up to CURRENT
         {
           SPDR = datalog[SPDR];
           break;
         }
         else
         {
-          if (SPDR >= 0xB0 && SPDR <= 0xBF)
+          if (SPDR == 0xFF)          // NO-OP / PING
           {
-            SPDR = temperaturearray[SPDR - 0xB0];
+            SPDR = 0xFF;
             break;
           }
-          else
+          if (SPDR == 0xFE)            // Signal which blocks has changed
           {
-            if (SPDR == 0xFF)          // NO-OP / PING
-            {
-              SPDR = 0xFF;
-              break;
-            }
-            if (SPDR == 0xFE)            // Signal which blocks has changed
-            {
-              SPDR = sample_send;
-              break;
-            }
-            if (SPDR == 0xAD)
-            {
-              new_sample_available = false;
-              spi_state = SPI_IDLE;
-              SPDR = test4;
-              test4 = 0;
-              break;
-            }
+            SPDR = sample_send;
+            break;
+          }
+          if (SPDR == 0xF0)
+          {
+            new_sample_available = false;
+            spi_state = SPI_IDLE;
+            SPDR = test4;
+            test4 = 0;
+            break;
           }
         }
         break;
@@ -407,10 +404,6 @@ void checkforchange(uint8_t x_start , uint8_t x_stop , uint8_t block)
 
 void setup()
 {
-  // Declare arrays to store samples in, no error checking... I KNOW...
-  datalog = static_cast<uint8_t*>(calloc(ARRAY_SIZE, sizeof(uint8_t)));
-  templog = static_cast<uint8_t*>(calloc(ARRAY_SIZE, sizeof(uint8_t)));
-
   // Initialize OneWire sensors
   sensors.begin();
   sensors.getAddress(tempDeviceAddress, 0);
@@ -489,14 +482,24 @@ void loop()
 
   if (millis() - lastTempRequest >= delayInMillis)
   {
-    temperature = sensors.getTempCByIndex(0);
-    if (temperature != DEVICE_DISCONNECTED_C)
+    for (uint8_t sensor = 0; sensor < NUM_SENSORS; sensor++)
     {
-      temperaturearray[0] = (int)temperature;
-      temperaturearray[1] = (int)round(temperature * 100.0) - (temperaturearray[0] * 100);
+      temperature = sensors.getTempCByIndex(sensor);
+      if (temperature != DEVICE_DISCONNECTED_C)
+      {
+        averagetemp += temperature;
+        if (num_avg++ >= 3)
+        {
+          temperature = averagetemp / 4.0;
+          num_avg = 0;
+          averagetemp = 0;
+          datalog[0xB0 + sensor * 2] = (int)temperature;
+          datalog[0xB1 + sensor * 2] = (int)round(temperature * 100.0) - (datalog[0xB0 + sensor * 2] * 100);
+        }
+      }
+      sensors.requestTemperatures();
+      lastTempRequest = millis();
     }
-    sensors.requestTemperatures();
-    lastTempRequest = millis();
   }
 
   // Start checking the status of the newly taken sample versus the last sent
