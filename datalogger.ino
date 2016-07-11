@@ -6,6 +6,10 @@
 #include <DallasTemperature.h>
 #include <OneWire.h>
 
+// Defs for making a median search routine
+#define MED_SORT(a,b) { if ((a)>(b)) MED_SWAP((a),(b)); }
+#define MED_SWAP(a,b) { float tmp=(a);(a)=(b);(b)=tmp; }
+
 // TWI buffer length
 #define TWI_BUFFER_LENGTH 4
 
@@ -30,13 +34,14 @@ DeviceAddress tempDeviceAddress;
 
 // Variables for handling sampling from OneWire sensors
 float temperature = 0.0;
-float averagetemp = 0.0;
-uint8_t num_avg = 0;
+float mediantemp = 0.0;
+uint8_t num_samp = 0;
+float temparray[NUM_SENSORS][3];
 unsigned long lastTempRequest = 0;
 unsigned int delayInMillis = 750;
 
 // Command buffer for I2C ISR
-static volatile uint8_t i2c_nextcmd[2] = { 0xDE, 0x01 };    // Preload with command to signal Modem = OK , SMS = 1  For some reason this cannot be volatile, problem with Wire library
+static volatile uint8_t i2c_nextcmd[2] = { 0xDE, 0x01 };    // Preload with command to signal Modem = OK , SMS = 1
 static volatile uint8_t save_i2ccmd[2];
 
 // State machine declarations for SPI
@@ -66,7 +71,7 @@ static volatile uint8_t count = 0;
 // Flags for sampling complete / available for transfer
 static volatile boolean sample_done = false;
 static volatile boolean new_sample_available = false;
-static volatile uint8_t sample_send = B01111111;
+static volatile uint8_t sample_send = B11111111;
 static volatile boolean command_pending = false;
 static volatile boolean start_sampling = false;
 
@@ -137,14 +142,15 @@ ISR (TWI_vect)
       {
         if (!sync)                  // If we got this far, we're in sync!
           sync = true;
-        if (start_sampling)
+        if (start_sampling)         // Check flag to see if we should start the sampling process
         {
-          i2c_nextcmd[0] = count;
+          i2c_nextcmd[0] = 0;       // Always start from the first address
+          count = 0;                // In case the counter somehow has changed, reset it
           start_sampling = false;
         }
         if (command_pending)
         {
-          save_i2ccmd[0] = i2c_nextcmd[0];
+          save_i2ccmd[0] = i2c_nextcmd[0];    // Store whatever we were doing and issue command instead
           save_i2ccmd[1] = i2c_nextcmd[1];
           i2c_nextcmd[0] = spi_cmd[0];
           i2c_nextcmd[1] = spi_cmd[1];
@@ -157,8 +163,9 @@ ISR (TWI_vect)
           i2c_nextcmd[0] = count;
         else
         {
-          i2c_nextcmd[0] = 0xFF;
-          sample_done = true;
+          i2c_nextcmd[0] = 0xFF;  // Load with NO-OP/PING command
+          count = 0;              // Reset counter ASAP to prevent out of bounds array addressing
+          sample_done = true;     // Set flag to indicate we have finished the sampling process
         }
       }
       twi_rxBufferIndex = 0;
@@ -354,14 +361,14 @@ ISR (SPI_STC_vect)
         break;
 
       case SPI_DUMP:                   // Routine for transferring data
-        if (SPDR < ARRAY_SIZE)           // Changed to 0xAD in ver 0.8.4, only send up to CURRENT
+        if (SPDR < ARRAY_SIZE)         // Check that we're within the array bounds
         {
           SPDR = datalog[SPDR];
           break;
         }
         else
         {
-          if (SPDR == 0xFF)          // NO-OP / PING
+          if (SPDR == 0xFF)            // NO-OP / PING
           {
             SPDR = 0xFF;
             break;
@@ -374,6 +381,7 @@ ISR (SPI_STC_vect)
           if (SPDR == 0xF0)
           {
             new_sample_available = false;
+            sample_send = 0;          // Reset now that we've sent everything
             spi_state = SPI_IDLE;
             SPDR = test4;
             test4 = 0;
@@ -384,6 +392,12 @@ ISR (SPI_STC_vect)
     }
   }
 } // end of SPI ISR
+
+float median3(float * f)
+{
+  MED_SORT(f[0], f[1]) ; MED_SORT(f[1], f[2]) ; MED_SORT(f[0], f[1]) ;
+  return (f[1]) ;
+}
 
 void checkforchange(uint8_t x_start , uint8_t x_stop , uint8_t block)
 {
@@ -405,7 +419,6 @@ void setup()
   sensors.setResolution(tempDeviceAddress, 12);
   sensors.setWaitForConversion(false);
   sensors.requestTemperatures();
-  lastTempRequest = millis();
 
   // Initialize ports
   // Set Port B1, B0 output
@@ -459,6 +472,28 @@ void setup()
 
   // Enable TWI module, acks and interrupt
   TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWEA);
+
+  delay(750);                                     // We have to guarantee that the array contains a valid temperature before we start the main program
+  if (millis() - lastTempRequest >= delayInMillis)
+  {
+    for (uint8_t sensor = 0; sensor < NUM_SENSORS; sensor++)
+    {
+      temperature = sensors.getTempCByIndex(sensor);
+      if (temperature != DEVICE_DISCONNECTED_C)
+      {
+        temparray[sensor][num_samp++] = temperature;
+        if (num_samp > 2)
+        {
+          mediantemp = median3(temparray[sensor]);
+          num_samp = 0;
+          datalog[0xB0 + sensor * 2] = (int)mediantemp;
+          datalog[0xB1 + sensor * 2] = (int)round(mediantemp * 100.0) - (int)mediantemp * 100;
+        }
+      }
+    }
+    sensors.requestTemperatures();
+    lastTempRequest = millis();
+  }
 } // end of setup
 
 void loop()
@@ -477,28 +512,23 @@ void loop()
       temperature = sensors.getTempCByIndex(sensor);
       if (temperature != DEVICE_DISCONNECTED_C)
       {
-        averagetemp += temperature;
-        if (num_avg++ >= 3)
+        temparray[sensor][num_samp++] = temperature;
+        if (num_samp > 2)
         {
-          temperature = averagetemp / 4.0;
-          num_avg = 0;
-          averagetemp = 0;
-          datalog[0xB0 + sensor * 2] = (int)temperature;
-          datalog[0xB1 + sensor * 2] = (int)round(temperature * 100.0) - (datalog[0xB0 + sensor * 2] * 100);
+          mediantemp = median3(temparray[sensor]);
+          num_samp = 0;
+          templog[0xB0 + sensor * 2] = (int)mediantemp;
+          templog[0xB1 + sensor * 2] = (int)round(mediantemp * 100.0) - (int)mediantemp * 100;
         }
       }
-      sensors.requestTemperatures();
-      lastTempRequest = millis();
     }
+    sensors.requestTemperatures();
+    lastTempRequest = millis();
   }
 
   // Start checking the status of the newly taken sample versus the last sent
   if (sample_done)
   {
-    sample_done = false;
-    sample_send = 0;
-    count = 0;
-    
     // Check for change in SYSTIME, normal every minute
     checkforchange(0x73 , 0x75 , B00000001);
 
@@ -526,6 +556,10 @@ void loop()
     checkforchange(0x9A , 0x9A , B01000000);
     checkforchange(0xA5 , 0xA7 , B01000000);
 
+    // Check for change in ONEWIRE, normal every change of temp
+    checkforchange(0xB0 , 0xB1 , B10000000);
+
+    sample_done = false;
     start_sampling = true;      // Go for another auto sample!
     test4++;                    // Increment the sample counter
   }
