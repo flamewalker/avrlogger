@@ -486,8 +486,8 @@ void setup()
         {
           mediantemp = median3(temparray[sensor]);
           num_samp = 0;
-          datalog[0xB0 + sensor * 2] = (int)mediantemp;
-          datalog[0xB1 + sensor * 2] = (int)round(mediantemp * 100.0) - (int)mediantemp * 100;
+          datalog[0xB0 + sensor * 2] = (uint8_t)mediantemp;
+          datalog[0xB1 + sensor * 2] = (uint8_t)((int)lrintf(mediantemp * 100.0) - (int)mediantemp * 100);
         }
       }
     }
@@ -517,8 +517,8 @@ void loop()
         {
           mediantemp = median3(temparray[sensor]);
           num_samp = 0;
-          templog[0xB0 + sensor * 2] = (int)mediantemp;
-          templog[0xB1 + sensor * 2] = (int)round(mediantemp * 100.0) - (int)mediantemp * 100;
+          templog[0xB0 + sensor * 2] = (uint8_t)mediantemp;
+          templog[0xB1 + sensor * 2] = (uint8_t)((int)lrintf(mediantemp * 100.0) - (int)mediantemp * 100);
         }
       }
     }
