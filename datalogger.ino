@@ -382,18 +382,18 @@ ISR (SPI_STC_vect)
         if (SPDR == 0xF0)
         {
           new_sample_available = false;
-          sample_send &= ~B01111111;       // Reset now that we've sent everything
+          sample_send = 0;              // Reset now that we've sent everything
           spi_state = SPI_IDLE;
-          SPDR = test4;                    // Load with number of samples we've collected since last time
+          SPDR = test4;                 // Load with number of samples we've collected since last time
           test4 = 0;
           break;
         }
         if (SPDR == 0xF1)
         {
           new_sample_available = false;
-          sample_send &= ~B10000000;      // Reset now that we've sent everything
+          sample_send = 0;              // Reset now that we've sent everything
           spi_state = SPI_IDLE;
-          SPDR = test5;                   // Load with number of samples we've collected since last time
+          SPDR = test5;                 // Load with number of samples we've collected since last time
           test5 = 0;
           break;
         }
