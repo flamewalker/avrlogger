@@ -346,6 +346,7 @@ ISR (SPI_STC_vect)
           test2 = 0;
           test3 = 0;
           test4 = 0;
+          test5 = 0;
           slask_tx1 = 0;
           slask_tx2 = 0;
           slask_rx1 = 0;
@@ -381,10 +382,19 @@ ISR (SPI_STC_vect)
         if (SPDR == 0xF0)
         {
           new_sample_available = false;
-          sample_send = 0;            // Reset now that we've sent everything
+          sample_send &= ~B01111111;       // Reset now that we've sent everything
           spi_state = SPI_IDLE;
-          SPDR = test4;               // Load with number of samples we've collected since last time
+          SPDR = test4;                    // Load with number of samples we've collected since last time
           test4 = 0;
+          break;
+        }
+        if (SPDR == 0xF1)
+        {
+          new_sample_available = false;
+          sample_send &= ~B10000000;      // Reset now that we've sent everything
+          spi_state = SPI_IDLE;
+          SPDR = test5;                   // Load with number of samples we've collected since last time
+          test5 = 0;
           break;
         }
       }
@@ -651,8 +661,7 @@ void loop()
       checkforchange(0xB0 , 0xAF + NUM_SENSORS * 2 , B10000000);
     sensors.requestTemperatures();
     lastTempRequest = millis();
-    if (new_sample_available)
-      PORTD |= (1 << PORTD7);     // Set the Interrupt line HIGH
+    test5++;
   }
 
   // Start checking the status of the newly taken sample versus the last sent
@@ -688,10 +697,10 @@ void loop()
     sample_done = false;
     start_sampling = true;      // Go for another auto sample!
     test4++;                    // Increment the sample counter
-    if (new_sample_available)
-      PORTD |= (1 << PORTD7);     // Set the Interrupt signal HIGH
   }
 
-  if (!new_sample_available)
+  if (new_sample_available)
+    PORTD |= (1 << PORTD7);     // Set the Interrupt signal HIGH
+  else
     PORTD &= ~(1 << PORTD7);    // Set the Interrupt signal LOW
 } // end of loop
