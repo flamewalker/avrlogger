@@ -100,9 +100,10 @@ static volatile uint8_t test1, test2, test3, test4, test5, test6, test7, test8, 
 static volatile uint8_t count = 0;
 
 // Flags for sampling complete / available for transfer
-static volatile boolean sample_done = false;
-static volatile boolean new_sample_available = false;
-static volatile uint8_t sample_send = B11111111;
+static volatile boolean twi_sample_done = false;
+static volatile boolean new_twi_sample, new_ow_sample = false;
+static volatile uint8_t twi_sample_send = B01111111;
+static volatile uint8_t ow_sample_send = B00000000;
 static volatile boolean start_sampling = true;
 
 // Flags for contact with CTC Ecologic EXT
@@ -183,7 +184,7 @@ ISR (TWI_vect)
         {
           twi_txBuffer[0] = 0xFF;  // Load with NO-OP/PING command
           count = 0;              // Reset counter ASAP to prevent out of bounds array addressing
-          sample_done = true;     // Set flag to indicate we have finished the sampling process
+          twi_sample_done = true;     // Set flag to indicate we have finished the sampling process
         }
       }
       break;
@@ -268,14 +269,14 @@ ISR (SPI_STC_vect)
         case 0xFF:                        // NO-OP/PING
           if (!sync)                      // Not in sync with TWI Master
             SPDR = 0x00;
-          else if (!new_sample_available)
+          else if (!new_twi_sample && !new_ow_sample)
             SPDR = 0x01;                  // In sync with TWI Master, no new sample available
           break;
 
         case 0xF0:                        // Array transfer command
           if (!sync)                      // Not in sync with TWI Master
             SPDR = 0x00;
-          else if (!new_sample_available) // In sync with TWI Master, no new sample available
+          else if (!new_twi_sample && !new_ow_sample) // In sync with TWI Master, no new sample available
             SPDR = 0x01;
           else
             spi_state = SPI_DUMP;         // We're in sync and a new sample is available, start transfer
@@ -369,32 +370,43 @@ ISR (SPI_STC_vect)
       }
       else
       {
-        if (SPDR == 0xFF)            // NO-OP/PING
+        if (SPDR == 0xFF)                 // NO-OP/PING
         {
           SPDR = 0xFF;
           break;
         }
-        if (SPDR == 0xFE)            // Signal which blocks has changed
+        if (SPDR == 0xFE)                 // Signal which blocks has changed
         {
-          SPDR = sample_send;
+          if (new_ow_sample)
+          {
+            SPDR = ow_sample_send;
+            if (!new_twi_sample)
+              PORTD &= ~(1 << PORTD7);        // Set the Interrupt signal LOW
+          }
+          else if (new_twi_sample)
+          {
+            SPDR = twi_sample_send;
+            if (!new_ow_sample)
+              PORTD &= ~(1 << PORTD7);        // Set the Interrupt signal LOW
+          }
           break;
         }
         if (SPDR == 0xF0)
         {
-          new_sample_available = false;
-          sample_send = 0;              // Reset now that we've sent everything
+          new_ow_sample = false;
+          ow_sample_send = 0;           // Reset now that we've sent everything
+          SPDR = test5;                 // Load with number of ow_samples we've collected since last time
+          test5 = 0;
           spi_state = SPI_IDLE;
-          SPDR = test4;                 // Load with number of samples we've collected since last time
-          test4 = 0;
           break;
         }
         if (SPDR == 0xF1)
         {
-          new_sample_available = false;
-          sample_send = 0;              // Reset now that we've sent everything
+          new_twi_sample = false;
+          twi_sample_send = 0;          // Reset now that we've sent everything
+          SPDR = test4;                 // Load with number of twi_samples we've collected since last time
+          test4 = 0;
           spi_state = SPI_IDLE;
-          SPDR = test5;                 // Load with number of samples we've collected since last time
-          test5 = 0;
           break;
         }
       }
@@ -463,16 +475,17 @@ static float median6(float *f)
 }
 #endif
 
-static void checkforchange(uint8_t x_start , uint8_t x_stop , uint8_t block)
+static boolean checkforchange(uint8_t x_start , uint8_t x_stop)
 {
+  boolean new_sample_available = false;
   // Check for change in the specified address and set according block, return true if change has occured
   for (uint8_t x = x_start ; x <= x_stop ; x++)
     if (datalog[x] != templog[x])
     {
       datalog[x] = templog[x];
-      sample_send |= block;
       new_sample_available = true;
     }
+  return new_sample_available;
 } // end of checkforchange
 
 static void set_ctc_temp(uint8_t t)
@@ -656,51 +669,75 @@ void loop()
         templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100;
       }
     }
-    if (sync)
-      // Check for change in ONEWIRE, normal every change of temp (could be ~750ms)
-      checkforchange(0xB0 , 0xAF + NUM_SENSORS * 2 , B10000000);
     sensors.requestTemperatures();
     lastTempRequest = millis();
     test5++;
+
+    // Check for change in ONEWIRE, normal every change of temp (could be ~750ms)
+    if (sync)
+      if (checkforchange(0xB0 , 0xAF + NUM_SENSORS * 2))
+        ow_sample_send = B10000000;
+
+    if (ow_sample_send != 0)
+    {
+      PORTD &= ~(1 << PORTD7);    // Set the Interrupt signal LOW
+      new_ow_sample = true;
+      PORTD |= (1 << PORTD7);     // Set the Interrupt signal HIGH
+    }
   }
 
   // Start checking the status of the newly taken sample versus the last sent
-  if (sample_done)
+  if (twi_sample_done)
   {
     // Check for change in SYSTIME, normal every minute
-    checkforchange(0x73 , 0x75 , B00000001);
+    if (checkforchange(0x73 , 0x75))
+      twi_sample_send |= B00000001;
 
     // Check for change in CURRENT, normal every change of temp
-    checkforchange(0x8C , 0x99 , B00000010);
-    checkforchange(0x9B , 0xA0 , B00000010);
-    checkforchange(0xA8 , 0xAC , B00000010);
+    if (checkforchange(0x8C , 0x99))
+      twi_sample_send |= B00000010;
+    if (checkforchange(0x9B , 0xA0))
+      twi_sample_send |= B00000010;
+    if (checkforchange(0xA8 , 0xAD))
+      twi_sample_send |= B00000010;
 
     // Check for change in HISTORICAL, normal every hour and week
-    checkforchange(0x76 , 0x7E , B00000100);
-    checkforchange(0x80 , 0x84 , B00000100);
-    checkforchange(0x87 , 0x8B , B00000100);
+    if (checkforchange(0x76 , 0x7E))
+      twi_sample_send |= B00000100;
+    if (checkforchange(0x80 , 0x84))
+      twi_sample_send |= B00000100;
+    if (checkforchange(0x87 , 0x8B))
+      twi_sample_send |= B00000100;
 
     // Check for change in SETTINGS, hardly ever any changes
-    checkforchange(0x00 , 0x68 , B00001000);
+    if (checkforchange(0x00 , 0x68))
+      twi_sample_send |= B00001000;
 
     // Check for change in ALARMS, almost never ever any changes
-    checkforchange(0xA1 , 0xA4 , B00010000);
+    if (checkforchange(0xA1 , 0xA4))
+      twi_sample_send |= B00010000;
 
     // Check for change in LAST_24H,  normal change once every hour
-    checkforchange(0x85 , 0x86 , B00100000);
-    checkforchange(0x7F , 0x7F , B00100000);
+    if (checkforchange(0x85 , 0x86))
+      twi_sample_send |= B00100000;
+    if (checkforchange(0x7F , 0x7F))
+      twi_sample_send |= B00100000;
 
     // Check for change in STATUS, normal change every minute
-    checkforchange(0x9A , 0x9A , B01000000);
-    checkforchange(0xA5 , 0xA7 , B01000000);
+    if (checkforchange(0x9A , 0x9A))
+      twi_sample_send |= B01000000;
+    if (checkforchange(0xA5 , 0xA7))
+      twi_sample_send |= B01000000;
 
-    sample_done = false;
+    twi_sample_done = false;
     start_sampling = true;      // Go for another auto sample!
     test4++;                    // Increment the sample counter
-  }
 
-  if (new_sample_available)
-    PORTD |= (1 << PORTD7);     // Set the Interrupt signal HIGH
-  else
-    PORTD &= ~(1 << PORTD7);    // Set the Interrupt signal LOW
+    if (twi_sample_send != 0)
+    {
+      PORTD &= ~(1 << PORTD7);    // Set the Interrupt signal LOW
+      new_twi_sample = true;
+      PORTD |= (1 << PORTD7);     // Set the Interrupt signal HIGH
+    }
+  }
 } // end of loop
