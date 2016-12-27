@@ -85,7 +85,7 @@ enum SPIState
 static volatile SPIState spi_state = SPI_IDLE;
 
 // Buffer and variables for SPI -> TWI command transfer
-static volatile uint8_t spi_cmd[2] = { 0xDE, 0x01 };
+static volatile uint8_t spi_cmd[2] = { 0xDE, 0x64 };
 static volatile uint8_t save_twi_tx;
 static volatile boolean command_pending = true;
 
