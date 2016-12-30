@@ -3,6 +3,10 @@
     ver 0.9.4
 **/
 
+#define VER_MAJOR 0
+#define VER_MINOR 9
+#define VER_BUILD 4
+
 #include <DallasTemperature.h>
 #include <OneWire.h>
 
@@ -290,8 +294,19 @@ ISR (SPI_STC_vect)
           spi_state = SPI_SET_TEMP;
           break;
 
-        case 0xF3:                  // Start command sequence to send cmd to digipot
+        case 0xF3:                        // Start command sequence to send cmd to digipot
           spi_state = SPI_DIGI_XFER;
+          break;
+
+        case 0xF4:                        // Send version number
+          SPCR &= ~(1 << SPIE);           // Disable the interrupt
+          SPDR = VER_MAJOR;
+          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+          SPDR = VER_MINOR;
+          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+          SPDR = VER_BUILD;
+          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+          SPCR |= (1 << SPIE);            // Enable the interrupt again
           break;
 
         case 0xA0:
@@ -628,6 +643,10 @@ void setup()
 
   // Enable TWI module, acks and interrupt
   TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWEA);
+
+  // Command DigiPot RESET (command number 14)
+  xfer(176, 0);
+
 } // end of setup
 
 void loop()
