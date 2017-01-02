@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 0.9.4
+    ver 1.0.0
 **/
 
-#define VER_MAJOR 0
-#define VER_MINOR 9
-#define VER_BUILD 4
+#define VER_MAJOR 1
+#define VER_MINOR 0
+#define VER_BUILD 0
 
 #include <DallasTemperature.h>
 #include <OneWire.h>
