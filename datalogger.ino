@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.0.0
+    ver 1.0.1
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 0
-#define VER_BUILD 0
+#define VER_BUILD 1
 
 #include <DallasTemperature.h>
 #include <OneWire.h>
@@ -571,7 +571,7 @@ void setup()
     temperature = sensors.getTempC(tempsensor[x]);
     if (temperature != DEVICE_DISCONNECTED_C)
     {
-      mediantemp = lrintf(temperature * 10.0) / 10.0;                       // Round to nearest, one decimal
+      mediantemp = lrintf(temperature * 10.0) * 0.1;                       // Round to nearest, one decimal
       templog[0xB0 + x * 2] = mediantemp;                                   // Split into integer and
       templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100; // two decimals
       datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
@@ -674,14 +674,14 @@ void loop()
                              + (0.8818931306 * tempfiltered[x][2]) + (-2.7564831952  * tempfiltered[x][3]) + (2.8743568927 * tempfiltered[x][4]);
 
         // Fill the median temporary storage
-        medtmp[x][0] = lrintf(tempfiltered[x][0] * 10.0) / 10.0;
-        medtmp[x][1] = lrintf(tempfiltered[x][1] * 10.0) / 10.0;
-        medtmp[x][2] = lrintf(tempfiltered[x][2] * 10.0) / 10.0;
-        medtmp[x][3] = lrintf(tempfiltered[x][3] * 10.0) / 10.0;
-        medtmp[x][4] = lrintf(tempfiltered[x][4] * 10.0) / 10.0;
-        medtmp[x][5] = lrintf(tempfiltered[x][5] * 10.0) / 10.0;
+        medtmp[x][0] = lrintf(tempfiltered[x][0] * 10.0) * 0.1;
+        medtmp[x][1] = lrintf(tempfiltered[x][1] * 10.0) * 0.1;
+        medtmp[x][2] = lrintf(tempfiltered[x][2] * 10.0) * 0.1;
+        medtmp[x][3] = lrintf(tempfiltered[x][3] * 10.0) * 0.1;
+        medtmp[x][4] = lrintf(tempfiltered[x][4] * 10.0) * 0.1;
+        medtmp[x][5] = lrintf(tempfiltered[x][5] * 10.0) * 0.1;
 
-        //mediantemp = lrintf(median6(medtmp[x]) * 10.0) / 10.0;
+        //mediantemp = lrintf(median6(medtmp[x]) * 10.0) * 0.1;
         mediantemp = median6(medtmp[x]);
 
         templog[0xB0 + x * 2] = mediantemp;
