@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.0.1
+    ver 1.1.3
 **/
 
 #define VER_MAJOR 1
-#define VER_MINOR 0
-#define VER_BUILD 1
+#define VER_MINOR 1
+#define VER_BUILD 3
 
 #include <DallasTemperature.h>
 #include <OneWire.h>
@@ -71,8 +71,8 @@ static float temperature, mediantemp = 0.0;
 static float medtmp[NUM_SENSORS][NUM_MEDIAN];
 static float owtemp[NUM_SENSORS][4];
 static float tempfiltered[NUM_SENSORS][NUM_MEDIAN];
-static unsigned long lastTempRequest = 0;
-static unsigned int delayInMillis = 750;
+static uint32_t lastTempRequest = 0;
+static uint16_t delayInMillis = 750;
 
 // State machine declarations for SPI
 enum SPIState
@@ -98,7 +98,8 @@ static volatile uint8_t datalog[ARRAY_SIZE];
 static volatile uint8_t templog[ARRAY_SIZE];
 
 // Debug vars
-static volatile uint8_t test1, test2, test3, test4, test5, test6, test7, test8, slask_tx1, slask_tx2, slask_rx1, slask_rx2 = 0;
+static volatile uint8_t test1, test2, test3, test4, test6, test7, test8, slask_tx1, slask_tx2, slask_rx1, slask_rx2 = 0;
+static volatile uint16_t test5 = 0;
 
 // Counter...
 static volatile uint8_t count = 0;
@@ -361,8 +362,6 @@ ISR (SPI_STC_vect)
           test1 = 0;
           test2 = 0;
           test3 = 0;
-          test4 = 0;
-          test5 = 0;
           slask_tx1 = 0;
           slask_tx2 = 0;
           slask_rx1 = 0;
@@ -409,8 +408,13 @@ ISR (SPI_STC_vect)
         if (SPDR == 0xF0)
         {
           new_ow_sample = false;
-          ow_sample_send = 0;           // Reset now that we've sent everything
-          SPDR = test5;                 // Load with number of ow_samples we've collected since last time
+          ow_sample_send = 0;              // Reset now that we've sent everything
+          SPDR = (test5 >> 8);             // Load with number of ow_samples we've collected since last time, MSByte
+          SPCR &= ~(1 << SPIE);            // Disable the interrupt
+          while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+          SPDR = (test5 & 0xFF);           // Load with number of ow_samples we've collected since last time, LSByte 
+          while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+          SPCR |= (1 << SPIE);             // Enable the interrupt again
           test5 = 0;
           spi_state = SPI_IDLE;
           break;
@@ -681,8 +685,8 @@ void loop()
         medtmp[x][4] = lrintf(tempfiltered[x][4] * 10.0) * 0.1;
         medtmp[x][5] = lrintf(tempfiltered[x][5] * 10.0) * 0.1;
 
-        //mediantemp = lrintf(median6(medtmp[x]) * 10.0) * 0.1;
-        mediantemp = median6(medtmp[x]);
+        mediantemp = lrintf(median6(medtmp[x]) * 10.0) * 0.1;
+//        mediantemp = median6(medtmp[x]);
 
         templog[0xB0 + x * 2] = mediantemp;
         templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100;
