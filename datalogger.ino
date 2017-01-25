@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.1.3
+    ver 1.1.8
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 1
-#define VER_BUILD 3
+#define VER_BUILD 8
 
 #include <DallasTemperature.h>
 #include <OneWire.h>
@@ -78,12 +78,7 @@ static uint16_t delayInMillis = 750;
 enum SPIState
 {
   SPI_IDLE,
-  SPI_COMMAND,
-  SPI_COMMAND_BYTE,
-  SPI_DUMP,
-  SPI_SET_TEMP,
-  SPI_DIGI_XFER,
-  SPI_DIGI_XFER_DATA
+  SPI_DUMP
 };
 
 static volatile SPIState spi_state = SPI_IDLE;
@@ -288,34 +283,57 @@ ISR (SPI_STC_vect)
           break;
 
         case 0xF1:                        // Start command transfer to TWI Master
-          spi_state = SPI_COMMAND;
+          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+          if (command_pending)            // Signal that we already have a unhandled command waiting
+            SPDR = 0xFF;
+          else
+            spi_cmd[0] = SPDR;            // First byte of command sequence
+          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+          if (command_pending)            // Signal that we already have a unhandled command waiting
+            SPDR = 0xFF;
+          else
+            spi_cmd[1] = SPDR;            // Second byte of command sequence
+          command_pending = true;
           break;
 
         case 0xF2:                        // Start DigiPot temp setting sequence
-          spi_state = SPI_SET_TEMP;
+          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+          set_ctc_temp(SPDR);             // Receive the temperature and set it
+          SPDR = dhw_ctc;
+          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+          SPDR = 0xFF;
           break;
 
-        case 0xF3:                        // Start command sequence to send cmd to digipot
-          spi_state = SPI_DIGI_XFER;
+        case 0xF3:                                // Start command sequence to send cmd to digipot
+          while (!(SPSR & (1 << SPIF)));          // Wait for next byte from Master
+          digi_cmd[0] = SPDR;                     // Receive cmd+adress byte for digipot
+          while (!(SPSR & (1 << SPIF)));          // Wait for next byte from Master
+          digi_cmd[1] = SPDR;                     // Receive data byte for digipot
+          SPDR = xfer(digi_cmd[0], digi_cmd[1]);  // Transfer to digipot and receive answer
+          while (!(SPSR & (1 << SPIF)));          // Wait for next byte from Master
+          SPDR = 0xFF;
           break;
 
         case 0xF4:                        // Send version number
-          SPCR &= ~(1 << SPIE);           // Disable the interrupt
           SPDR = VER_MAJOR;
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
           SPDR = VER_MINOR;
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
           SPDR = VER_BUILD;
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPCR |= (1 << SPIE);            // Enable the interrupt again
+          SPDR = 0xFF;                    // Access SPDR to clear SPIF
           break;
 
         case 0xA0:
           SPDR = test1;
+          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+          SPDR = 0xFF;                    // Access SPDR to clear SPIF
           break;
 
         case 0xA1:
           SPDR = test2;
+          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+          SPDR = 0xFF;                    // Access SPDR to clear SPIF
           break;
 
         case 0xA2:
@@ -374,13 +392,11 @@ ISR (SPI_STC_vect)
     case SPI_DUMP:                        // Routine for transferring data
       if (SPDR < ARRAY_SIZE)              // Request for something in the array?
       {
-        SPCR &= ~(1 << SPIE);             // Disable the interrupt
         while (SPDR < ARRAY_SIZE)         // Continue as long we get requests within the array size
         {
           SPDR = datalog[SPDR];
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
         }
-        SPCR |= (1 << SPIE);              // Enable the interrupt again
       }
       else
       {
@@ -407,60 +423,27 @@ ISR (SPI_STC_vect)
         }
         if (SPDR == 0xF0)
         {
-          new_ow_sample = false;
-          ow_sample_send = 0;              // Reset now that we've sent everything
           SPDR = (test5 >> 8);             // Load with number of ow_samples we've collected since last time, MSByte
-          SPCR &= ~(1 << SPIE);            // Disable the interrupt
           while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
-          SPDR = (test5 & 0xFF);           // Load with number of ow_samples we've collected since last time, LSByte 
+          SPDR = (test5 & 0xFF);           // Load with number of ow_samples we've collected since last time, LSByte
           while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
-          SPCR |= (1 << SPIE);             // Enable the interrupt again
+          SPDR = 0xFF;                     // Access SPDR to clear SPIF
           test5 = 0;
           spi_state = SPI_IDLE;
+          new_ow_sample = false;
+          ow_sample_send = 0;              // Reset now that we've sent everything
           break;
         }
         if (SPDR == 0xF1)
         {
-          new_twi_sample = false;
-          twi_sample_send = 0;          // Reset now that we've sent everything
           SPDR = test4;                 // Load with number of twi_samples we've collected since last time
           test4 = 0;
           spi_state = SPI_IDLE;
+          new_twi_sample = false;
+          twi_sample_send = 0;          // Reset now that we've sent everything
           break;
         }
       }
-      break;
-
-    case SPI_COMMAND:                // First byte of command sequence
-      spi_cmd[0] = SPDR;
-      if (command_pending)           // Signal that we already have a unhandled command waiting
-        SPDR = 0xFF;
-      spi_state = SPI_COMMAND_BYTE;
-      break;
-
-    case SPI_COMMAND_BYTE:           // Second byte of command sequence
-      spi_cmd[1] = SPDR;
-      if (command_pending)           // Signal that we already have a unhandled command waiting
-        SPDR = 0xFF;
-      command_pending = true;
-      spi_state = SPI_IDLE;
-      break;
-
-    case SPI_SET_TEMP:                 // Receive the temperature to set
-      set_ctc_temp(SPDR);
-      SPDR = dhw_ctc;
-      spi_state = SPI_IDLE;
-      break;
-
-    case SPI_DIGI_XFER:                // Receive cmd+address byte for digipot
-      digi_cmd[0] = SPDR;
-      spi_state = SPI_DIGI_XFER_DATA;
-      break;
-
-    case SPI_DIGI_XFER_DATA:           // Receive data byte for digipot
-      digi_cmd[1] = SPDR;
-      SPDR = xfer(digi_cmd[0], digi_cmd[1]);
-      spi_state = SPI_IDLE;
       break;
   }
 } // end of SPI ISR
