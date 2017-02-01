@@ -2,4 +2,4 @@
 datalogger.hex
 
 # Build dir
-./build
+build/
