@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.8
+    ver 1.2.9
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 2
-#define VER_BUILD 8
+#define VER_BUILD 9
 
 #include <DallasTemperature.h>
 #include <OneWire.h>
@@ -48,29 +48,17 @@ DeviceAddress tempsensor[] = {0x28, 0x2E, 0xE8, 0x1D, 0x07, 0x00, 0x00, 0x80,   
                               0x28, 0x41, 0x2B, 0x29, 0x07, 0x00, 0x00, 0x4D,    // Sensor8
                               0x28, 0x99, 0x6D, 0x1C, 0x07, 0x00, 0x00, 0x94     // Sensor9
                              };
-/*
-float sensor_calibration[] = { 0.00,   // Sensor0
-                              -0.05,   // Sensor1
-                               0.05,   // Sensor2
-                               0.00,   // Sensor3
-                               0.05,   // Sensor4
-                               0.00,   // Sensor5
-                               0.00,   // Sensor6
-                               0.00,   // Sensor7
-                               0.00,   // Sensor8
-                               0.00    // Sensor9
-                             };
-*/
+
 float sensor_calibration[NUM_SENSORS];
 
-union Data
+// A method for converting float to array of uint8_t and back
+union Convert
 {
   uint8_t buf[4];
   float number;
 };
 
-static volatile union Data data;
-static volatile uint8_t xx;
+static volatile union Convert convert;
 
 // Look-up table for controlling digipot to simulate 22K NTC between 26-98C
 const uint8_t temp[] = {16,   33,  52,  77,  94,
@@ -388,28 +376,28 @@ ISR (SPI_STC_vect)
 
         case 0xF7:                        // Program sensor_calibration
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          data.buf[0] = SPDR;
+          convert.buf[0] = SPDR;
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          data.buf[1] = SPDR;
+          convert.buf[1] = SPDR;
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          data.buf[2] = SPDR;
+          convert.buf[2] = SPDR;
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          data.buf[3] = SPDR;
+          convert.buf[3] = SPDR;
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          sensor_calibration[SPDR] = data.number;
+          sensor_calibration[SPDR] = convert.number;
           EEPROM.put((SPDR * sizeof(float)), sensor_calibration[SPDR]);
           break;
 
         case 0xF8:                        // Read sensor_calibration
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          data.number = sensor_calibration[SPDR];
-          SPDR = data.buf[0];
+          convert.number = sensor_calibration[SPDR];
+          SPDR = convert.buf[0];
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = data.buf[1];
+          SPDR = convert.buf[1];
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = data.buf[2];
+          SPDR = convert.buf[2];
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = data.buf[3];
+          SPDR = convert.buf[3];
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
           SPDR = 0xFF;                    // Access SPDR to clear SPIF
           break;
@@ -639,11 +627,6 @@ static uint8_t xfer(uint8_t data1, uint8_t data2)
 
 void setup()
 {
-/*
-  // One time write
-  for (uint8_t x = 0; x < NUM_SENSORS; x++)
-    EEPROM.put((x * sizeof(float)), sensor_calibration[x]);
-*/
   // Initialize sensor calibration values from EEPROM
   for (uint8_t x = 0; x < NUM_SENSORS; x++)
     EEPROM.get((x * sizeof(float)), sensor_calibration[x]);
