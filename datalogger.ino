@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.9
+    ver 1.2.10
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 2
-#define VER_BUILD 9
+#define VER_BUILD 10
 
 #include <DallasTemperature.h>
 #include <OneWire.h>
@@ -193,9 +193,9 @@ ISR (TWI_vect)
           twi_txBuffer[0] = count;
         else
         {
-          twi_txBuffer[0] = 0xFF;  // Load with NO-OP/PING command
-          count = 0;              // Reset counter ASAP to prevent out of bounds array addressing
-          twi_sample_done = true;     // Set flag to indicate we have finished the sampling process
+          twi_txBuffer[0] = 0xFF;   // Load with NO-OP/PING command
+          count = 0;                // Reset counter ASAP to prevent out of bounds array addressing
+          twi_sample_done = true;   // Set flag to indicate we have finished the sampling process
         }
       }
       break;
@@ -248,16 +248,12 @@ ISR (TWI_vect)
 
     // TWI Errors
     case 0xF8:          // No relevant state information available; TWINT = "0"
-      test2 |= 32;    // Debug
+      test2 |= 32;      // Debug
       break;
 
     case 0x00:          // Bus Error due to an illegal START or STOP condition
       test1++;                        // Debug
       test2 |= 64;                    // Debug
-      slask_rx1 = twi_rxBuffer[0];    // Debug
-      slask_rx2 = twi_rxBuffer[1];    // Debug
-      slask_tx1 = twi_txBuffer[0];    // Debug
-      slask_tx2 = twi_txBuffer[1];    // Debug
       // Release bus and reset TWI hardware
       TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT) | (1 << TWEA) | (1 << TWSTO);
       break;
@@ -290,7 +286,27 @@ ISR (SPI_STC_vect)
           else if (!new_twi_sample && !new_ow_sample) // In sync with TWI Master, no new sample available
             SPDR = 0x01;
           else
-            spi_state = SPI_DUMP;         // We're in sync and a new sample is available, start transfer
+          {
+            SPDR = 0xFA;
+            while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+            if (new_ow_sample)
+            {
+              SPDR = ow_sample_send;
+              while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
+              SPDR = 0xFF;                   // Access SPDR to clear SPIF
+              if (!new_twi_sample)
+                PORTD &= ~(1 << PORTD7);     // Set the Interrupt signal LOW
+            }
+            else if (new_twi_sample)
+            {
+              SPDR = twi_sample_send;
+              while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
+              SPDR = 0xFF;                   // Access SPDR to clear SPIF
+              if (!new_ow_sample)
+                PORTD &= ~(1 << PORTD7);     // Set the Interrupt signal LOW
+            }
+            spi_state = SPI_DUMP;            // We're in sync and a new sample is available, start transfer
+          }
           break;
 
         case 0xF1:                        // Start command transfer to TWI Master
@@ -467,36 +483,20 @@ ISR (SPI_STC_vect)
       }
       break;
 
-    case SPI_DUMP:                        // Routine for transferring data
-      if (SPDR < ARRAY_SIZE)              // Request for something in the array?
+    case SPI_DUMP:                         // Routine for transferring data
+      if (SPDR < ARRAY_SIZE)               // Request for something in the array?
       {
-        while (SPDR < ARRAY_SIZE)         // Continue as long we get requests within the array size
+        while (SPDR < ARRAY_SIZE)          // Continue as long we get requests within the array size
         {
           SPDR = datalog[SPDR];
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+          while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
         }
       }
       else
       {
-        if (SPDR == 0xFF)                 // NO-OP/PING
+        if (SPDR == 0xFF)                  // NO-OP/PING
         {
           SPDR = 0xFF;
-          break;
-        }
-        if (SPDR == 0xFE)                 // Signal which blocks has changed
-        {
-          if (new_ow_sample)
-          {
-            SPDR = ow_sample_send;
-            if (!new_twi_sample)
-              PORTD &= ~(1 << PORTD7);        // Set the Interrupt signal LOW
-          }
-          else if (new_twi_sample)
-          {
-            SPDR = twi_sample_send;
-            if (!new_ow_sample)
-              PORTD &= ~(1 << PORTD7);        // Set the Interrupt signal LOW
-          }
           break;
         }
         if (SPDR == 0xF0)
@@ -514,11 +514,13 @@ ISR (SPI_STC_vect)
         }
         if (SPDR == 0xF1)
         {
-          SPDR = test4;                 // Load with number of twi_samples we've collected since last time
+          SPDR = test4;                    // Load with number of twi_samples we've collected since last time
+          while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+          SPDR = 0xFF;                     // Access SPDR to clear SPIF
           test4 = 0;
           spi_state = SPI_IDLE;
           new_twi_sample = false;
-          twi_sample_send = 0;          // Reset now that we've sent everything
+          twi_sample_send = 0;             // Reset now that we've sent everything
           break;
         }
       }
