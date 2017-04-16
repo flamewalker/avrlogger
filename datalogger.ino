@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.10
+    ver 1.2.14
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 2
-#define VER_BUILD 10
+#define VER_BUILD 14
 
 #include <DallasTemperature.h>
 #include <OneWire.h>
@@ -15,14 +15,14 @@
 #define MED_SORT(a,b) { if ((a)>(b)) MED_SWAP((a),(b)); }
 #define MED_SWAP(a,b) { float tmp=(a);(a)=(b);(b)=tmp; }
 
-#define NUM_MEDIAN 6    // Number of medians, if any
+#define NUM_MEDIAN 0    // Number of medians, if any
+
+// Number of connected OneWire sensors
+#define NUM_SENSORS 10
 
 // Basic array sizes, just need to add the number of connected OneWire sensors
 #define ARRAY_SIZE 0xB0 + NUM_SENSORS * 2
 #define SAMPLE_SIZE 0xAD
-
-// Number of connected OneWire sensors
-#define NUM_SENSORS 6
 
 // TWI buffer length
 #define TWI_BUFFER_LENGTH 6
@@ -79,11 +79,11 @@ static volatile uint8_t dhw_ctc = 75;
 
 // Variables for handling sampling from OneWire sensors
 static float temperature, mediantemp = 0.0;
-static float medtmp[NUM_SENSORS][NUM_MEDIAN];
+//static float medtmp[NUM_SENSORS][NUM_MEDIAN];
 static float owtemp[NUM_SENSORS][4];
-static float tempfiltered[NUM_SENSORS][NUM_MEDIAN];
+static float tempfiltered[NUM_SENSORS][4];
 static uint32_t lastTempRequest = 0;
-static uint16_t delayInMillis = 750;
+static uint16_t delayInMillis = 2000;
 
 // State machine declarations for SPI
 enum SPIState
@@ -268,246 +268,62 @@ ISR (TWI_vect)
 */
 ISR (SPI_STC_vect)
 {
-  switch (spi_state)
+  switch (SPDR)
   {
-    case SPI_IDLE:
-      switch (SPDR)
-      {
-        case 0xFF:                        // NO-OP/PING
-          if (!sync)                      // Not in sync with TWI Master
-            SPDR = 0x00;
-          else if (!new_twi_sample && !new_ow_sample)
-            SPDR = 0x01;                  // In sync with TWI Master, no new sample available
-          break;
-
-        case 0xF0:                        // Array transfer command
-          if (!sync)                      // Not in sync with TWI Master
-            SPDR = 0x00;
-          else if (!new_twi_sample && !new_ow_sample) // In sync with TWI Master, no new sample available
-            SPDR = 0x01;
-          else
-          {
-            SPDR = 0xFA;
-            while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
-            if (new_ow_sample)
-            {
-              SPDR = ow_sample_send;
-              while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
-              SPDR = 0xFF;                   // Access SPDR to clear SPIF
-              if (!new_twi_sample)
-                PORTD &= ~(1 << PORTD7);     // Set the Interrupt signal LOW
-            }
-            else if (new_twi_sample)
-            {
-              SPDR = twi_sample_send;
-              while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
-              SPDR = 0xFF;                   // Access SPDR to clear SPIF
-              if (!new_ow_sample)
-                PORTD &= ~(1 << PORTD7);     // Set the Interrupt signal LOW
-            }
-            spi_state = SPI_DUMP;            // We're in sync and a new sample is available, start transfer
-          }
-          break;
-
-        case 0xF1:                        // Start command transfer to TWI Master
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          if (command_pending)            // Signal that we already have a unhandled command waiting
-            SPDR = 0xFF;
-          else
-            spi_cmd[0] = SPDR;            // First byte of command sequence
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          if (command_pending)            // Signal that we already have a unhandled command waiting
-            SPDR = 0xFF;
-          else
-            spi_cmd[1] = SPDR;            // Second byte of command sequence
-          command_pending = true;
-          break;
-
-        case 0xF2:                        // Start DigiPot temp setting sequence
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          set_ctc_temp(SPDR);             // Receive the temperature and set it
-          SPDR = dhw_ctc;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = 0xFF;
-          break;
-
-        case 0xF3:                                // Start command sequence to send cmd to digipot
-          while (!(SPSR & (1 << SPIF)));          // Wait for next byte from Master
-          digi_cmd[0] = SPDR;                     // Receive cmd+adress byte for digipot
-          while (!(SPSR & (1 << SPIF)));          // Wait for next byte from Master
-          digi_cmd[1] = SPDR;                     // Receive data byte for digipot
-          SPDR = xfer(digi_cmd[0], digi_cmd[1]);  // Transfer to digipot and receive answer
-          while (!(SPSR & (1 << SPIF)));          // Wait for next byte from Master
-          SPDR = 0xFF;
-          break;
-
-        case 0xF4:                        // Send version number
-          SPDR = VER_MAJOR;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = VER_MINOR;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = VER_BUILD;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = 0xFF;                    // Access SPDR to clear SPIF
-          break;
-
-        case 0xF5:                        // Fetch ALL debug variables
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = test1;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = test2;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = test3;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = count;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = twi_rxBuffer[0];
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = twi_rxBuffer[1];
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = twi_txBuffer[0];
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = twi_txBuffer[1];
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = slask_rx1;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = slask_rx2;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = slask_tx1;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = slask_tx2;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = 0xFF;                    // Access SPDR to clear SPIF
-          break;
-
-        case 0xF6:                        // Release bus and reset TWI hardware
-          TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT) | (1 << TWEA) | (1 << TWSTO);
-          if (!sync)                      // Not in sync with TWI Master
-            SPDR = 0x00;
-          else if (!new_twi_sample && !new_ow_sample)
-            SPDR = 0x01;                  // In sync with TWI Master, no new sample available
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = 0xFF;                    // Access SPDR to clear SPIF
-          break;
-
-        case 0xF7:                        // Program sensor_calibration
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          convert.buf[0] = SPDR;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          convert.buf[1] = SPDR;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          convert.buf[2] = SPDR;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          convert.buf[3] = SPDR;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          sensor_calibration[SPDR] = convert.number;
-          EEPROM.put((SPDR * sizeof(float)), sensor_calibration[SPDR]);
-          break;
-
-        case 0xF8:                        // Read sensor_calibration
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          convert.number = sensor_calibration[SPDR];
-          SPDR = convert.buf[0];
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = convert.buf[1];
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = convert.buf[2];
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = convert.buf[3];
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = 0xFF;                    // Access SPDR to clear SPIF
-          break;
-
-        case 0xA0:
-          SPDR = test1;                   // Number of TWI bus errors due to illegal START or STOP condition
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = 0xFF;                    // Access SPDR to clear SPIF
-          break;
-
-        case 0xA1:
-          SPDR = test2;                   // Bitflags of TWI error conditions
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = 0xFF;                    // Access SPDR to clear SPIF
-          break;
-
-        case 0xA2:
-          SPDR = test3;
-          break;
-
-        case 0xA3:
-          SPDR = count;
-          break;
-
-        case 0xA4:
-          SPDR = twi_rxBuffer[0];
-          break;
-
-        case 0xA5:
-          SPDR = twi_rxBuffer[1];
-          break;
-
-        case 0xA6:
-          SPDR = twi_txBuffer[0];
-          break;
-
-        case 0xA7:
-          SPDR = twi_txBuffer[1];
-          break;
-
-        case 0xA8:
-          SPDR = slask_rx1;
-          break;
-
-        case 0xA9:
-          SPDR = slask_rx2;
-          break;
-
-        case 0xAA:
-          SPDR = slask_tx1;
-          break;
-
-        case 0xAB:
-          SPDR = slask_tx2;
-          break;
-
-        case 0xAF:
-          test1 = 0;
-          test2 = 0;
-          test3 = 0;
-          slask_tx1 = 0;
-          slask_tx2 = 0;
-          slask_rx1 = 0;
-          slask_rx2 = 0;
-          SPDR = 0xAF;
-          break;
-      }
+    case 0xFF:                        // NO-OP/PING
+      if (!sync)                      // Not in sync with TWI Master
+        SPDR = 0x00;
+      else if (!new_twi_sample && !new_ow_sample)
+        SPDR = 0x01;                  // In sync with TWI Master, no new sample available
       break;
 
-    case SPI_DUMP:                         // Routine for transferring data
-      if (SPDR < ARRAY_SIZE)               // Request for something in the array?
-      {
-        while (SPDR < ARRAY_SIZE)          // Continue as long we get requests within the array size
-        {
-          SPDR = datalog[SPDR];
-          while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
-        }
-      }
+    case 0xF0:                        // Array transfer command
+      if (!sync)                      // Not in sync with TWI Master
+        SPDR = 0x00;
+      else if (!new_twi_sample && !new_ow_sample) // In sync with TWI Master, no new sample available
+        SPDR = 0x01;
       else
       {
-        if (SPDR == 0xFF)                  // NO-OP/PING
+        SPDR = 0xFA;
+        while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+        if (new_ow_sample)
         {
-          SPDR = 0xFF;
-          break;
+          SPDR = ow_sample_send;
+          while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
+          SPDR = 0xFF;                   // Access SPDR to clear SPIF
+          if (!new_twi_sample)
+            PORTD &= ~(1 << PORTD7);     // Set the Interrupt signal LOW
         }
+        else if (new_twi_sample)
+        {
+          SPDR = twi_sample_send;
+          while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
+          SPDR = 0xFF;                   // Access SPDR to clear SPIF
+          if (!new_ow_sample)
+            PORTD &= ~(1 << PORTD7);     // Set the Interrupt signal LOW
+        }
+
+		while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
+
+		while (SPDR < ARRAY_SIZE)
+        {
+          while (SPDR < ARRAY_SIZE)          // Continue as long we get requests within the array size
+          {
+            SPDR = datalog[SPDR];
+            while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+          }
+
+          while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+        }
+
         if (SPDR == 0xF0)
         {
           SPDR = (test5 >> 8);             // Load with number of ow_samples we've collected since last time, MSByte
           while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
           SPDR = (test5 & 0xFF);           // Load with number of ow_samples we've collected since last time, LSByte
           while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
-          SPDR = 0xFF;                     // Access SPDR to clear SPIF
+          SPDR = 0xFB;                     // Access SPDR to clear SPIF
           test5 = 0;
-          spi_state = SPI_IDLE;
           new_ow_sample = false;
           ow_sample_send = 0;              // Reset now that we've sent everything
           break;
@@ -516,14 +332,185 @@ ISR (SPI_STC_vect)
         {
           SPDR = test4;                    // Load with number of twi_samples we've collected since last time
           while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
-          SPDR = 0xFF;                     // Access SPDR to clear SPIF
+          SPDR = 0xFC;                     // Access SPDR to clear SPIF
           test4 = 0;
-          spi_state = SPI_IDLE;
           new_twi_sample = false;
           twi_sample_send = 0;             // Reset now that we've sent everything
           break;
         }
       }
+      break;
+
+    case 0xF1:                        // Start command transfer to TWI Master
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      if (command_pending)            // Signal that we already have a unhandled command waiting
+        SPDR = 0xFF;
+      else
+        spi_cmd[0] = SPDR;            // First byte of command sequence
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      if (command_pending)            // Signal that we already have a unhandled command waiting
+        SPDR = 0xFF;
+      else
+        spi_cmd[1] = SPDR;            // Second byte of command sequence
+      command_pending = true;
+      break;
+
+    case 0xF2:                        // Start DigiPot temp setting sequence
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      set_ctc_temp(SPDR);             // Receive the temperature and set it
+      SPDR = dhw_ctc;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xFF;
+      break;
+
+    case 0xF3:                                // Start command sequence to send cmd to digipot
+      while (!(SPSR & (1 << SPIF)));          // Wait for next byte from Master
+      digi_cmd[0] = SPDR;                     // Receive cmd+adress byte for digipot
+      while (!(SPSR & (1 << SPIF)));          // Wait for next byte from Master
+      digi_cmd[1] = SPDR;                     // Receive data byte for digipot
+      SPDR = xfer(digi_cmd[0], digi_cmd[1]);  // Transfer to digipot and receive answer
+      while (!(SPSR & (1 << SPIF)));          // Wait for next byte from Master
+      SPDR = 0xFF;
+      break;
+
+    case 0xF4:                        // Send version number
+      SPDR = VER_MAJOR;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = VER_MINOR;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = VER_BUILD;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xFF;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xF5:                        // Fetch ALL debug variables
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = test1;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = test2;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = test3;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = count;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = twi_rxBuffer[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = twi_rxBuffer[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = twi_txBuffer[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = twi_txBuffer[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = slask_rx1;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = slask_rx2;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = slask_tx1;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = slask_tx2;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xFF;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xF6:                        // Release bus and reset TWI hardware
+      TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT) | (1 << TWEA) | (1 << TWSTO);
+      if (!sync)                      // Not in sync with TWI Master
+        SPDR = 0x00;
+      else if (!new_twi_sample && !new_ow_sample)
+        SPDR = 0x01;                  // In sync with TWI Master, no new sample available
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xFF;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xF7:                        // Program sensor_calibration
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.buf[0] = SPDR;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.buf[1] = SPDR;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.buf[2] = SPDR;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.buf[3] = SPDR;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      sensor_calibration[SPDR] = convert.number;
+      EEPROM.put((SPDR * sizeof(float)), sensor_calibration[SPDR]);
+      break;
+
+    case 0xF8:                        // Read sensor_calibration
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.number = sensor_calibration[SPDR];
+      SPDR = convert.buf[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.buf[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.buf[2];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.buf[3];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xFF;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xA0:
+      SPDR = test1;                   // Number of TWI bus errors due to illegal START or STOP condition
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xFF;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xA1:
+      SPDR = test2;                   // Bitflags of TWI error conditions
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xFF;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xA2:
+      SPDR = test3;
+      break;
+
+    case 0xA3:
+      SPDR = count;
+      break;
+
+    case 0xA4:
+      SPDR = twi_rxBuffer[0];
+      break;
+
+    case 0xA5:
+      SPDR = twi_rxBuffer[1];
+      break;
+
+    case 0xA6:
+      SPDR = twi_txBuffer[0];
+      break;
+
+    case 0xA7:
+      SPDR = twi_txBuffer[1];
+      break;
+
+    case 0xA8:
+      SPDR = slask_rx1;
+      break;
+
+    case 0xA9:
+      SPDR = slask_rx2;
+      break;
+
+    case 0xAA:
+      SPDR = slask_tx1;
+      break;
+
+    case 0xAB:
+      SPDR = slask_tx2;
+      break;
+
+    case 0xAF:
+      test1 = 0;
+      test2 = 0;
+      test3 = 0;
+      slask_tx1 = 0;
+      slask_tx2 = 0;
+      slask_rx1 = 0;
+      slask_rx2 = 0;
+      SPDR = 0xAF;
       break;
   }
 } // end of SPI ISR
@@ -629,6 +616,10 @@ static uint8_t xfer(uint8_t data1, uint8_t data2)
 
 void setup()
 {
+  // Initialize ports
+  // Disable all pull-ups
+  MCUCR |= (1 << PUD);
+
   // Initialize sensor calibration values from EEPROM
   for (uint8_t x = 0; x < NUM_SENSORS; x++)
     EEPROM.get((x * sizeof(float)), sensor_calibration[x]);
@@ -645,23 +636,28 @@ void setup()
       // Apply sensor calibration
       temperature = temperature + sensor_calibration[x];
 
-      mediantemp = lrintf(temperature * 10.0) * 0.1;                       // Round to nearest, one decimal
+      mediantemp = lrintf(temperature * 10.0) * 0.1;                        // Round to nearest, one decimal
       templog[0xB0 + x * 2] = mediantemp;                                   // Split into integer and
       templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100; // two decimals
       datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
       datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
 
       // Init the filter
-      owtemp[x][0] = mediantemp;
-      owtemp[x][1] = mediantemp;
-      owtemp[x][2] = mediantemp;
-      owtemp[x][3] = mediantemp;
-      tempfiltered[x][0] = mediantemp;
-      tempfiltered[x][1] = mediantemp;
-      tempfiltered[x][2] = mediantemp;
-      tempfiltered[x][3] = mediantemp;
-      tempfiltered[x][4] = mediantemp;
-      tempfiltered[x][5] = mediantemp;
+      owtemp[x][0] = temperature;
+      owtemp[x][1] = temperature;
+      owtemp[x][2] = temperature;
+      owtemp[x][3] = temperature;
+      tempfiltered[x][0] = temperature;
+      tempfiltered[x][1] = temperature;
+      tempfiltered[x][2] = temperature;
+      tempfiltered[x][3] = temperature;
+    }
+    else
+    {
+      templog[0xB0 + x * 2] = 0;
+      templog[0xB1 + x * 2] = 0;
+      datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
+      datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
     }
   }
   sensors.setWaitForConversion(false);        // Now that we have a starting value in the array we don't have to wait for conversions anymore
@@ -745,12 +741,11 @@ void loop()
         tempfiltered[x][0] = tempfiltered[x][1];
         tempfiltered[x][1] = tempfiltered[x][2];
         tempfiltered[x][2] = tempfiltered[x][3];
-        tempfiltered[x][3] = tempfiltered[x][4];
-        tempfiltered[x][4] = tempfiltered[x][5];
-        tempfiltered[x][5] = (owtemp[x][0] + owtemp[x][3] + 3 * (owtemp[x][1] + owtemp[x][2])) / 3.430944333e+04
-                             + (0.8818931306 * tempfiltered[x][2]) + (-2.7564831952  * tempfiltered[x][3]) + (2.8743568927 * tempfiltered[x][4]);
 
-        // Fill the median temporary storage
+        tempfiltered[x][3] = (owtemp[x][0] + owtemp[x][3] + 3 * (owtemp[x][1] + owtemp[x][2])) / 3.430944333e+04 + (0.8818931306 * tempfiltered[x][0]) + (-2.7564831952  * tempfiltered[x][1]) + (2.8743568927 * tempfiltered[x][2]);
+
+/*
+		// Fill the median temporary storage
         medtmp[x][0] = lrintf(tempfiltered[x][0] * 10.0) * 0.1;
         medtmp[x][1] = lrintf(tempfiltered[x][1] * 10.0) * 0.1;
         medtmp[x][2] = lrintf(tempfiltered[x][2] * 10.0) * 0.1;
@@ -760,9 +755,16 @@ void loop()
 
         mediantemp = lrintf(median6(medtmp[x]) * 10.0) * 0.1;
 //        mediantemp = median6(medtmp[x]);
+*/
 
+        mediantemp = lrintf(tempfiltered[x][3] * 10.0) * 0.1;
         templog[0xB0 + x * 2] = mediantemp;
         templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100;
+      }
+      else
+      {
+        templog[0xB0 + x * 2] = 0;
+        templog[0xB1 + x * 2] = 0;
       }
     }
     sensors.requestTemperatures();
