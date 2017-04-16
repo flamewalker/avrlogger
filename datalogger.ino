@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.10
+    ver 1.2.13
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 2
-#define VER_BUILD 10
+#define VER_BUILD 13
 
 #include <DallasTemperature.h>
 #include <OneWire.h>
@@ -15,14 +15,14 @@
 #define MED_SORT(a,b) { if ((a)>(b)) MED_SWAP((a),(b)); }
 #define MED_SWAP(a,b) { float tmp=(a);(a)=(b);(b)=tmp; }
 
-#define NUM_MEDIAN 6    // Number of medians, if any
+#define NUM_MEDIAN 0    // Number of medians, if any
+
+// Number of connected OneWire sensors
+#define NUM_SENSORS 10
 
 // Basic array sizes, just need to add the number of connected OneWire sensors
 #define ARRAY_SIZE 0xB0 + NUM_SENSORS * 2
 #define SAMPLE_SIZE 0xAD
-
-// Number of connected OneWire sensors
-#define NUM_SENSORS 6
 
 // TWI buffer length
 #define TWI_BUFFER_LENGTH 6
@@ -79,11 +79,11 @@ static volatile uint8_t dhw_ctc = 75;
 
 // Variables for handling sampling from OneWire sensors
 static float temperature, mediantemp = 0.0;
-static float medtmp[NUM_SENSORS][NUM_MEDIAN];
+//static float medtmp[NUM_SENSORS][NUM_MEDIAN];
 static float owtemp[NUM_SENSORS][4];
-static float tempfiltered[NUM_SENSORS][NUM_MEDIAN];
+static float tempfiltered[NUM_SENSORS][4];
 static uint32_t lastTempRequest = 0;
-static uint16_t delayInMillis = 750;
+static uint16_t delayInMillis = 2000;
 
 // State machine declarations for SPI
 enum SPIState
@@ -629,6 +629,10 @@ static uint8_t xfer(uint8_t data1, uint8_t data2)
 
 void setup()
 {
+  // Initialize ports
+  // Disable all pull-ups
+  MCUCR |= (1 << PUD);
+
   // Initialize sensor calibration values from EEPROM
   for (uint8_t x = 0; x < NUM_SENSORS; x++)
     EEPROM.get((x * sizeof(float)), sensor_calibration[x]);
@@ -645,23 +649,28 @@ void setup()
       // Apply sensor calibration
       temperature = temperature + sensor_calibration[x];
 
-      mediantemp = lrintf(temperature * 10.0) * 0.1;                       // Round to nearest, one decimal
+      mediantemp = lrintf(temperature * 10.0) * 0.1;                        // Round to nearest, one decimal
       templog[0xB0 + x * 2] = mediantemp;                                   // Split into integer and
       templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100; // two decimals
       datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
       datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
 
       // Init the filter
-      owtemp[x][0] = mediantemp;
-      owtemp[x][1] = mediantemp;
-      owtemp[x][2] = mediantemp;
-      owtemp[x][3] = mediantemp;
-      tempfiltered[x][0] = mediantemp;
-      tempfiltered[x][1] = mediantemp;
-      tempfiltered[x][2] = mediantemp;
-      tempfiltered[x][3] = mediantemp;
-      tempfiltered[x][4] = mediantemp;
-      tempfiltered[x][5] = mediantemp;
+      owtemp[x][0] = temperature;
+      owtemp[x][1] = temperature;
+      owtemp[x][2] = temperature;
+      owtemp[x][3] = temperature;
+      tempfiltered[x][0] = temperature;
+      tempfiltered[x][1] = temperature;
+      tempfiltered[x][2] = temperature;
+      tempfiltered[x][3] = temperature;
+    }
+    else
+    {
+      templog[0xB0 + x * 2] = 0;
+      templog[0xB1 + x * 2] = 0;
+      datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
+      datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
     }
   }
   sensors.setWaitForConversion(false);        // Now that we have a starting value in the array we don't have to wait for conversions anymore
@@ -745,11 +754,10 @@ void loop()
         tempfiltered[x][0] = tempfiltered[x][1];
         tempfiltered[x][1] = tempfiltered[x][2];
         tempfiltered[x][2] = tempfiltered[x][3];
-        tempfiltered[x][3] = tempfiltered[x][4];
-        tempfiltered[x][4] = tempfiltered[x][5];
-        tempfiltered[x][5] = (owtemp[x][0] + owtemp[x][3] + 3 * (owtemp[x][1] + owtemp[x][2])) / 3.430944333e+04
-                             + (0.8818931306 * tempfiltered[x][2]) + (-2.7564831952  * tempfiltered[x][3]) + (2.8743568927 * tempfiltered[x][4]);
 
+        tempfiltered[x][3] = (owtemp[x][0] + owtemp[x][3] + 3 * (owtemp[x][1] + owtemp[x][2])) / 3.430944333e+04 + (0.8818931306 * tempfiltered[x][0]) + (-2.7564831952  * tempfiltered[x][1]) + (2.8743568927 * tempfiltered[x][2]);
+
+/*
         // Fill the median temporary storage
         medtmp[x][0] = lrintf(tempfiltered[x][0] * 10.0) * 0.1;
         medtmp[x][1] = lrintf(tempfiltered[x][1] * 10.0) * 0.1;
@@ -760,9 +768,16 @@ void loop()
 
         mediantemp = lrintf(median6(medtmp[x]) * 10.0) * 0.1;
 //        mediantemp = median6(medtmp[x]);
+*/
 
+        mediantemp = lrintf(tempfiltered[x][3] * 10.0) * 0.1;
         templog[0xB0 + x * 2] = mediantemp;
         templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100;
+      }
+      else
+      {
+        templog[0xB0 + x * 2] = 0;
+        templog[0xB1 + x * 2] = 0;
       }
     }
     sensors.requestTemperatures();
