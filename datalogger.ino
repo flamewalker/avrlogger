@@ -303,9 +303,9 @@ ISR (SPI_STC_vect)
             PORTD &= ~(1 << PORTD7);     // Set the Interrupt signal LOW
         }
 
-		while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
+        while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
 
-		while (SPDR < ARRAY_SIZE)
+        while (SPDR < ARRAY_SIZE)
         {
           while (SPDR < ARRAY_SIZE)          // Continue as long we get requests within the array size
           {
@@ -742,7 +742,7 @@ void loop()
         tempfiltered[x][1] = tempfiltered[x][2];
         tempfiltered[x][2] = tempfiltered[x][3];
 
-        tempfiltered[x][3] = (owtemp[x][0] + owtemp[x][3] + 3 * (owtemp[x][1] + owtemp[x][2])) / 3.430944333e+04 + (0.8818931306 * tempfiltered[x][0]) + (-2.7564831952  * tempfiltered[x][1]) + (2.8743568927 * tempfiltered[x][2]);
+        tempfiltered[x][3] = (owtemp[x][0] + owtemp[x][3] + 3 * (owtemp[x][1] + owtemp[x][2])) / 3.430944333e+04 + (0.8818931306 * tempfiltered[x][0]) + (-2.7564831952 * tempfiltered[x][1]) + (2.8743568927 * tempfiltered[x][2]);
 
 /*
 		// Fill the median temporary storage
