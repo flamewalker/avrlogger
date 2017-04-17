@@ -754,8 +754,7 @@ void loop()
         tempfiltered[x][0] = tempfiltered[x][1];
         tempfiltered[x][1] = tempfiltered[x][2];
         tempfiltered[x][2] = tempfiltered[x][3];
-
-        tempfiltered[x][3] = (owtemp[x][0] + owtemp[x][3] + 3 * (owtemp[x][1] + owtemp[x][2])) / 3.430944333e+04 + (0.8818931306 * tempfiltered[x][0]) + (-2.7564831952  * tempfiltered[x][1]) + (2.8743568927 * tempfiltered[x][2]);
+        tempfiltered[x][3] = (owtemp[x][0] + owtemp[x][3] + 3 * (owtemp[x][1] + owtemp[x][2])) / 3.430944333e+04 + (0.8818931306 * tempfiltered[x][0]) + (-2.7564831952 * tempfiltered[x][1]) + (2.8743568927 * tempfiltered[x][2]);
 
 /*
         // Fill the median temporary storage
