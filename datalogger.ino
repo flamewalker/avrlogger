@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.13
+    ver 1.2.132
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 2
-#define VER_BUILD 13
+#define VER_BUILD 132
 
 #include <DallasTemperature.h>
 #include <OneWire.h>
@@ -293,7 +293,7 @@ ISR (SPI_STC_vect)
             {
               SPDR = ow_sample_send;
               while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
-              SPDR = 0xFF;                   // Access SPDR to clear SPIF
+              SPDR = 0xFD;                   // Access SPDR to clear SPIF
               if (!new_twi_sample)
                 PORTD &= ~(1 << PORTD7);     // Set the Interrupt signal LOW
             }
@@ -301,7 +301,7 @@ ISR (SPI_STC_vect)
             {
               SPDR = twi_sample_send;
               while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
-              SPDR = 0xFF;                   // Access SPDR to clear SPIF
+              SPDR = 0xFD;                   // Access SPDR to clear SPIF
               if (!new_ow_sample)
                 PORTD &= ~(1 << PORTD7);     // Set the Interrupt signal LOW
             }
@@ -386,6 +386,8 @@ ISR (SPI_STC_vect)
             SPDR = 0x00;
           else if (!new_twi_sample && !new_ow_sample)
             SPDR = 0x01;                  // In sync with TWI Master, no new sample available
+          else
+            SPDR = 0xFE;
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
           SPDR = 0xFF;                    // Access SPDR to clear SPIF
           break;
