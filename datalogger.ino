@@ -1,12 +1,13 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.14
+    ver 1.2.150
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 2
-#define VER_BUILD 14
+#define VER_BUILD 150
 
+/*
 #include <DallasTemperature.h>
 #include <OneWire.h>
 #include <EEPROM.h>
@@ -16,6 +17,7 @@
 #define MED_SWAP(a,b) { float tmp=(a);(a)=(b);(b)=tmp; }
 
 #define NUM_MEDIAN 0    // Number of medians, if any
+*/
 
 // Number of connected OneWire sensors
 #define NUM_SENSORS 10
@@ -25,8 +27,9 @@
 #define SAMPLE_SIZE 0xAD
 
 // TWI buffer length
-#define TWI_BUFFER_LENGTH 6
+#define TWI_BUFFER_LENGTH 4
 
+/*
 // Data wire is plugged into port 2 on the Arduino
 #define ONE_WIRE_BUS 2
 
@@ -59,6 +62,7 @@ union Convert
 };
 
 static volatile union Convert convert;
+*/
 
 // Look-up table for controlling digipot to simulate 22K NTC between 26-98C
 const uint8_t temp[] = {16,   33,  52,  77,  94,
@@ -77,6 +81,7 @@ static volatile uint8_t digi_cmd[2] = {0, 0};
 // Variable to hold actual temp of hot water
 static volatile uint8_t dhw_ctc = 75;
 
+/*
 // Variables for handling sampling from OneWire sensors
 static float temperature, mediantemp = 0.0;
 //static float medtmp[NUM_SENSORS][NUM_MEDIAN];
@@ -84,7 +89,9 @@ static float owtemp[NUM_SENSORS][4];
 static float tempfiltered[NUM_SENSORS][4];
 static uint32_t lastTempRequest = 0;
 static uint16_t delayInMillis = 2000;
+*/
 
+/*
 // State machine declarations for SPI
 enum SPIState
 {
@@ -93,6 +100,7 @@ enum SPIState
 };
 
 static volatile SPIState spi_state = SPI_IDLE;
+*/
 
 // Buffer and variables for SPI -> TWI command transfer
 static volatile uint8_t spi_cmd[2] = { 0xDE, 0x64 };
@@ -421,7 +429,7 @@ ISR (SPI_STC_vect)
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = 0xFF;                    // Access SPDR to clear SPIF
       break;
-
+/*
     case 0xF7:                        // Program sensor_calibration
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       convert.buf[0] = SPDR;
@@ -449,7 +457,7 @@ ISR (SPI_STC_vect)
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = 0xFF;                    // Access SPDR to clear SPIF
       break;
-
+*/
     case 0xA0:
       SPDR = test1;                   // Number of TWI bus errors due to illegal START or STOP condition
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
@@ -620,6 +628,7 @@ void setup()
   // Disable all pull-ups
   MCUCR |= (1 << PUD);
 
+/*
   // Initialize sensor calibration values from EEPROM
   for (uint8_t x = 0; x < NUM_SENSORS; x++)
     EEPROM.get((x * sizeof(float)), sensor_calibration[x]);
@@ -663,6 +672,7 @@ void setup()
   sensors.setWaitForConversion(false);        // Now that we have a starting value in the array we don't have to wait for conversions anymore
   sensors.requestTemperatures();
   lastTempRequest = millis();
+*/
 
   // Initialize ports
   // Set Port B1, B0 output
@@ -721,6 +731,7 @@ void setup()
 
 void loop()
 {
+/*
   if (millis() - lastTempRequest >= delayInMillis)
   {
     for (uint8_t x = 0; x < NUM_SENSORS; x++)
@@ -756,7 +767,7 @@ void loop()
         mediantemp = lrintf(median6(medtmp[x]) * 10.0) * 0.1;
 //        mediantemp = median6(medtmp[x]);
 */
-
+/*
         mediantemp = lrintf(tempfiltered[x][3] * 10.0) * 0.1;
         templog[0xB0 + x * 2] = mediantemp;
         templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100;
@@ -783,6 +794,7 @@ void loop()
       PORTD |= (1 << PORTD7);     // Set the Interrupt signal HIGH
     }
   }
+*/
 
   // Start checking the status of the newly taken sample versus the last sent
   if (twi_sample_done)
