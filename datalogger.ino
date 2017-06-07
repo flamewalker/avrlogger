@@ -298,7 +298,7 @@ ISR (SPI_STC_vect)
         {
           SPDR = ow_sample_send;
           while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
-          SPDR = 0xFF;                   // Access SPDR to clear SPIF
+          SPDR = 0xFD;                   // Access SPDR to clear SPIF
           if (!new_twi_sample)
             PORTD &= ~(1 << PORTD7);     // Set the Interrupt signal LOW
         }
@@ -306,7 +306,7 @@ ISR (SPI_STC_vect)
         {
           SPDR = twi_sample_send;
           while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
-          SPDR = 0xFF;                   // Access SPDR to clear SPIF
+          SPDR = 0xFD;                   // Access SPDR to clear SPIF
           if (!new_ow_sample)
             PORTD &= ~(1 << PORTD7);     // Set the Interrupt signal LOW
         }
@@ -330,7 +330,7 @@ ISR (SPI_STC_vect)
           while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
           SPDR = (test5 & 0xFF);           // Load with number of ow_samples we've collected since last time, LSByte
           while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
-          SPDR = 0xFB;                     // Access SPDR to clear SPIF
+          SPDR = 0xFF;                     // Access SPDR to clear SPIF
           test5 = 0;
           new_ow_sample = false;
           ow_sample_send = 0;              // Reset now that we've sent everything
@@ -340,7 +340,7 @@ ISR (SPI_STC_vect)
         {
           SPDR = test4;                    // Load with number of twi_samples we've collected since last time
           while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
-          SPDR = 0xFC;                     // Access SPDR to clear SPIF
+          SPDR = 0xFF;                     // Access SPDR to clear SPIF
           test4 = 0;
           new_twi_sample = false;
           twi_sample_send = 0;             // Reset now that we've sent everything
