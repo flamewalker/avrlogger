@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.150
+    ver 1.2.151
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 2
-#define VER_BUILD 150
+#define VER_BUILD 151
 
 /*
 #include <DallasTemperature.h>
@@ -690,8 +690,12 @@ void setup()
   // Set Port B4 output, SPI MISO
   DDRB |= (1 << DDB4);
 
+/*
   // Interrupt enabled, SPI enabled, MSB first, Slave, CLK low when idle, Sample on leading edge of CLK (SPI Mode 0)
   SPCR = (1 << SPIE) | (1 << SPE);
+*/
+  // Interrupt enabled, SPI enabled, MSB first, Slave, CLK high when idle, Sample on leading edge of CLK (SPI Mode 2)
+  SPCR = (1 << SPIE) | (1 << SPE) | (1 << CPOL);
 
   // Clear the registers
   uint8_t clr = SPSR;
@@ -704,8 +708,12 @@ void setup()
   // Set Port D4 output, Port D5 output: SPI CLK, SS
   DDRD |= (1 << DDD4) | (1 << DDD5);
 
-  // Enable USART0 SPI Master Mode, MSB first, CLK low when idle, Sample on trailing edge of CLK (Mode 1)
+/*
+  // Enable USART0 SPI Master Mode, MSB first, CLK low when idle, Sample on trailing edge of CLK (SPI Mode 1)
   UCSR0C = (1 << UMSEL01) | (1 << UMSEL00) | (1 << UCPHA0);
+*/
+  // Enable USART0 SPI Master Mode, MSB first, CLK high when idle, Sample on leading edge of CLK (SPI Mode 2)
+  UCSR0C = (1 << UMSEL01) | (1 << UMSEL00) | (1 << UCPOL0);
 
   // Enable USART0 SPI Master Mode receiver and transmitter
   UCSR0B = (1 << RXEN0) | (1 << TXEN0);
