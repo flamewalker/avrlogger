@@ -1,15 +1,14 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.151
+    ver 1.2.161
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 2
-#define VER_BUILD 151
+#define VER_BUILD 161
 
-/*
-#include <DallasTemperature.h>
 #include <OneWire.h>
+#include <DallasTemperature.h>
 #include <EEPROM.h>
 
 // Defs for making a median search routine
@@ -17,10 +16,9 @@
 #define MED_SWAP(a,b) { float tmp=(a);(a)=(b);(b)=tmp; }
 
 #define NUM_MEDIAN 0    // Number of medians, if any
-*/
 
 // Number of connected OneWire sensors
-#define NUM_SENSORS 10
+#define NUM_SENSORS 11
 
 // Basic array sizes, just need to add the number of connected OneWire sensors
 #define ARRAY_SIZE 0xB0 + NUM_SENSORS * 2
@@ -29,7 +27,6 @@
 // TWI buffer length
 #define TWI_BUFFER_LENGTH 4
 
-/*
 // Data wire is plugged into port 2 on the Arduino
 #define ONE_WIRE_BUS 2
 
@@ -49,7 +46,8 @@ DeviceAddress tempsensor[] = {0x28, 0x2E, 0xE8, 0x1D, 0x07, 0x00, 0x00, 0x80,   
                               0x28, 0x2E, 0x68, 0x1D, 0x07, 0x00, 0x00, 0x4B,    // Sensor6
                               0x28, 0x20, 0x40, 0x1D, 0x07, 0x00, 0x00, 0x9E,    // Sensor7
                               0x28, 0x41, 0x2B, 0x29, 0x07, 0x00, 0x00, 0x4D,    // Sensor8
-                              0x28, 0x99, 0x6D, 0x1C, 0x07, 0x00, 0x00, 0x94     // Sensor9
+                              0x28, 0x99, 0x6D, 0x1C, 0x07, 0x00, 0x00, 0x94,    // Sensor9
+                              0x3B, 0x3F, 0xA8, 0x5D, 0x06, 0xD8, 0x4C, 0x39     // Sensor10  (Thermocouple type K, via MAX31850K
                              };
 
 float sensor_calibration[NUM_SENSORS];
@@ -61,8 +59,14 @@ union Convert
   float number;
 };
 
+union Split
+{
+  uint8_t buf[2];
+  int16_t number;
+};
+
 static volatile union Convert convert;
-*/
+static volatile union Split split;
 
 // Look-up table for controlling digipot to simulate 22K NTC between 26-98C
 const uint8_t temp[] = {16,   33,  52,  77,  94,
@@ -81,15 +85,13 @@ static volatile uint8_t digi_cmd[2] = {0, 0};
 // Variable to hold actual temp of hot water
 static volatile uint8_t dhw_ctc = 75;
 
-/*
 // Variables for handling sampling from OneWire sensors
 static float temperature, mediantemp = 0.0;
 //static float medtmp[NUM_SENSORS][NUM_MEDIAN];
 static float owtemp[NUM_SENSORS][4];
 static float tempfiltered[NUM_SENSORS][4];
 static uint32_t lastTempRequest = 0;
-static uint16_t delayInMillis = 2000;
-*/
+static uint16_t delayInMillis = 750;
 
 /*
 // State machine declarations for SPI
@@ -122,8 +124,9 @@ static volatile uint8_t count = 0;
 static volatile boolean twi_sample_done = false;
 static volatile boolean new_twi_sample, new_ow_sample = false;
 static volatile uint8_t twi_sample_send = B01111111;
-static volatile uint8_t ow_sample_send = B00000000;
+static volatile uint8_t ow_sample_send = B10000000;
 static volatile boolean start_sampling = true;
+static volatile boolean ok_sample_ow = false;
 
 // Flags for contact with CTC Ecologic EXT
 static volatile boolean sync = false;
@@ -409,14 +412,16 @@ ISR (SPI_STC_vect)
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = twi_txBuffer[1];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = slask_rx1;
+      SPDR = twi_rxBuffer[2];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = slask_rx2;
+      SPDR = twi_rxBuffer[3];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = slask_tx1;
+/*
+      SPDR = twi_rxBuffer[4];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = slask_tx2;
+      SPDR = twi_rxBuffer[5];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+*/
       SPDR = 0xFF;                    // Access SPDR to clear SPIF
       break;
 
@@ -429,7 +434,7 @@ ISR (SPI_STC_vect)
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = 0xFF;                    // Access SPDR to clear SPIF
       break;
-/*
+
     case 0xF7:                        // Program sensor_calibration
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       convert.buf[0] = SPDR;
@@ -457,7 +462,7 @@ ISR (SPI_STC_vect)
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = 0xFF;                    // Access SPDR to clear SPIF
       break;
-*/
+
     case 0xA0:
       SPDR = test1;                   // Number of TWI bus errors due to illegal START or STOP condition
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
@@ -628,7 +633,6 @@ void setup()
   // Disable all pull-ups
   MCUCR |= (1 << PUD);
 
-/*
   // Initialize sensor calibration values from EEPROM
   for (uint8_t x = 0; x < NUM_SENSORS; x++)
     EEPROM.get((x * sizeof(float)), sensor_calibration[x]);
@@ -640,16 +644,27 @@ void setup()
   for (uint8_t x = 0; x < NUM_SENSORS; x++)
   {
     temperature = sensors.getTempC(tempsensor[x]);
-    if (temperature != DEVICE_DISCONNECTED_C)
+    if (temperature != DEVICE_DISCONNECTED_C && !isnan(temperature))
     {
       // Apply sensor calibration
       temperature = temperature + sensor_calibration[x];
 
-      mediantemp = lrintf(temperature * 10.0) * 0.1;                        // Round to nearest, one decimal
-      templog[0xB0 + x * 2] = mediantemp;                                   // Split into integer and
-      templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100; // two decimals
-      datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
-      datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
+      if (x != 10)
+      {
+        mediantemp = lrintf(temperature * 10.0) * 0.1;                        // Round to nearest, one decimal
+        templog[0xB0 + x * 2] = mediantemp;                                   // Split into integer and
+        templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100; // two decimals
+        datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
+        datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
+      }
+      else
+      {
+        split.number = (int16_t)lrintf(temperature);
+        templog[0xB0 + x * 2] = split.buf[0];                                   // Split into high and
+        templog[0xB1 + x * 2] = split.buf[1];					// low part of int
+        datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
+        datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
+      }
 
       // Init the filter
       owtemp[x][0] = temperature;
@@ -661,18 +676,18 @@ void setup()
       tempfiltered[x][2] = temperature;
       tempfiltered[x][3] = temperature;
     }
-    else
+/*    else
     {
       templog[0xB0 + x * 2] = 0;
       templog[0xB1 + x * 2] = 0;
       datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
       datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
     }
+*/
   }
   sensors.setWaitForConversion(false);        // Now that we have a starting value in the array we don't have to wait for conversions anymore
   sensors.requestTemperatures();
   lastTempRequest = millis();
-*/
 
   // Initialize ports
   // Set Port B1, B0 output
@@ -690,10 +705,6 @@ void setup()
   // Set Port B4 output, SPI MISO
   DDRB |= (1 << DDB4);
 
-/*
-  // Interrupt enabled, SPI enabled, MSB first, Slave, CLK low when idle, Sample on leading edge of CLK (SPI Mode 0)
-  SPCR = (1 << SPIE) | (1 << SPE);
-*/
   // Interrupt enabled, SPI enabled, MSB first, Slave, CLK high when idle, Sample on leading edge of CLK (SPI Mode 2)
   SPCR = (1 << SPIE) | (1 << SPE) | (1 << CPOL);
 
@@ -708,10 +719,6 @@ void setup()
   // Set Port D4 output, Port D5 output: SPI CLK, SS
   DDRD |= (1 << DDD4) | (1 << DDD5);
 
-/*
-  // Enable USART0 SPI Master Mode, MSB first, CLK low when idle, Sample on trailing edge of CLK (SPI Mode 1)
-  UCSR0C = (1 << UMSEL01) | (1 << UMSEL00) | (1 << UCPHA0);
-*/
   // Enable USART0 SPI Master Mode, MSB first, CLK high when idle, Sample on leading edge of CLK (SPI Mode 2)
   UCSR0C = (1 << UMSEL01) | (1 << UMSEL00) | (1 << UCPOL0);
 
@@ -739,13 +746,12 @@ void setup()
 
 void loop()
 {
-/*
-  if (millis() - lastTempRequest >= delayInMillis)
+  if (ok_sample_ow && (millis() - lastTempRequest >= delayInMillis))
   {
     for (uint8_t x = 0; x < NUM_SENSORS; x++)
     {
       temperature = sensors.getTempC(tempsensor[x]);
-      if (temperature != DEVICE_DISCONNECTED_C)
+      if (temperature != DEVICE_DISCONNECTED_C && !isnan(temperature))
       {
         // Apply sensor calibration
         temperature = temperature + sensor_calibration[x];
@@ -775,20 +781,30 @@ void loop()
         mediantemp = lrintf(median6(medtmp[x]) * 10.0) * 0.1;
 //        mediantemp = median6(medtmp[x]);
 */
-/*
-        mediantemp = lrintf(tempfiltered[x][3] * 10.0) * 0.1;
-        templog[0xB0 + x * 2] = mediantemp;
-        templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100;
+        if (x != 10)
+        {
+          mediantemp = lrintf(tempfiltered[x][3] * 10.0) * 0.1;
+          templog[0xB0 + x * 2] = mediantemp;
+          templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100;
+        }
+        else
+        {
+          split.number = (int16_t)lrintf(tempfiltered[x][3]);
+          templog[0xB0 + x * 2] = split.buf[0];					// Split into high and
+          templog[0xB1 + x * 2] = split.buf[1];					// low part of int
+        }
       }
-      else
+/*      else
       {
         templog[0xB0 + x * 2] = 0;
         templog[0xB1 + x * 2] = 0;
       }
+*/
     }
     sensors.requestTemperatures();
     lastTempRequest = millis();
     test5++;
+    ok_sample_ow = false;
 
     // Check for change in ONEWIRE, normal every change of temp (could be ~750ms)
     if (sync)
@@ -802,11 +818,12 @@ void loop()
       PORTD |= (1 << PORTD7);     // Set the Interrupt signal HIGH
     }
   }
-*/
 
   // Start checking the status of the newly taken sample versus the last sent
   if (twi_sample_done)
   {
+    ok_sample_ow = true;
+
     // Check for change in SYSTIME, normal every minute
     if (checkforchange(0x73 , 0x75))
       twi_sample_send |= B00000001;
