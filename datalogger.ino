@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.161
+    ver 1.2.162
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 2
-#define VER_BUILD 161
+#define VER_BUILD 162
 
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -91,7 +91,7 @@ static float temperature, mediantemp = 0.0;
 static float owtemp[NUM_SENSORS][4];
 static float tempfiltered[NUM_SENSORS][4];
 static uint32_t lastTempRequest = 0;
-static uint16_t delayInMillis = 750;
+static uint16_t delayInMillis = 2000;
 
 /*
 // State machine declarations for SPI
@@ -463,6 +463,15 @@ ISR (SPI_STC_vect)
       SPDR = 0xFF;                    // Access SPDR to clear SPIF
       break;
 
+    case 0xF9:                        // Read ADC0
+      SPDR = templog[0xAE];           // Load first byte
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = templog[0xAF];           // Load second byte
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xFF;                    // Access SPDR to clear SPIF
+      ADCSRA |= (1 << ADSC);
+      break;
+
     case 0xA0:
       SPDR = test1;                   // Number of TWI bus errors due to illegal START or STOP condition
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
@@ -475,46 +484,6 @@ ISR (SPI_STC_vect)
       SPDR = 0xFF;                    // Access SPDR to clear SPIF
       break;
 
-    case 0xA2:
-      SPDR = test3;
-      break;
-
-    case 0xA3:
-      SPDR = count;
-      break;
-
-    case 0xA4:
-      SPDR = twi_rxBuffer[0];
-      break;
-
-    case 0xA5:
-      SPDR = twi_rxBuffer[1];
-      break;
-
-    case 0xA6:
-      SPDR = twi_txBuffer[0];
-      break;
-
-    case 0xA7:
-      SPDR = twi_txBuffer[1];
-      break;
-
-    case 0xA8:
-      SPDR = slask_rx1;
-      break;
-
-    case 0xA9:
-      SPDR = slask_rx2;
-      break;
-
-    case 0xAA:
-      SPDR = slask_tx1;
-      break;
-
-    case 0xAB:
-      SPDR = slask_tx2;
-      break;
-
     case 0xAF:
       test1 = 0;
       test2 = 0;
@@ -523,10 +492,22 @@ ISR (SPI_STC_vect)
       slask_tx2 = 0;
       slask_rx1 = 0;
       slask_rx2 = 0;
+      twi_rxBuffer[2] = 0;
+      twi_rxBuffer[3] = 0;
       SPDR = 0xAF;
       break;
   }
 } // end of SPI ISR
+
+/*
+  ADC ISR
+*/
+ISR (ADC_vect)
+{
+  split.number = ADC;
+  templog[0xAE] = split.buf[0];
+  templog[0xAF] = split.buf[1];
+} // end of ADC ISR
 
 #if NUM_MEDIAN == 3
 static float median3(float *f)
@@ -633,6 +614,23 @@ void setup()
   // Disable all pull-ups
   MCUCR |= (1 << PUD);
 
+  // Set Port B1, B0 output
+  DDRB |= (1 << DDB1) | (1 << DDB0);
+
+  // Set Port C0, C1, C2, C3 analog input
+  DDRC &= ~((1 << DDC3) | (1 << DDC2) | (1 << DDC1) | (1 << DDC0));
+  DIDR0 |= (1 << ADC3D) | (1 << ADC2D) | (1 << ADC1D) | (1 << ADC0D);
+
+  // Set Port D7, D6 output, sample_ready signal
+  DDRD |= (1 << DDD7) | (1 << DDD6);
+
+  // Initialize ADC
+  // Set Vref to AVcc, ADC0 selected
+  ADMUX |= (1 << REFS0);
+
+  // ADC enable, start first conversion, enable interrupt, prescaler CLK/128 = 125kHz
+  ADCSRA |= (1 << ADEN) | (1 << ADSC) | (1 << ADIE) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
+
   // Initialize sensor calibration values from EEPROM
   for (uint8_t x = 0; x < NUM_SENSORS; x++)
     EEPROM.get((x * sizeof(float)), sensor_calibration[x]);
@@ -688,17 +686,6 @@ void setup()
   sensors.setWaitForConversion(false);        // Now that we have a starting value in the array we don't have to wait for conversions anymore
   sensors.requestTemperatures();
   lastTempRequest = millis();
-
-  // Initialize ports
-  // Set Port B1, B0 output
-  DDRB |= (1 << DDB1) | (1 << DDB0);
-
-  // Set Port C0, C1, C2, C3 analog input
-  DDRC &= ~((1 << DDC3) | (1 << DDC2) | (1 << DDC1) | (1 << DDC0));
-  DIDR0 |= (1 << ADC3D) | (1 << ADC2D) | (1 << ADC1D) | (1 << ADC0D);
-
-  // Set Port D7, D6 output, sample_ready signal
-  DDRD |= (1 << DDD7) | (1 << DDD6);
 
   // Initialize all the interfaces
   // SPI slave interface to Raspberry Pi
