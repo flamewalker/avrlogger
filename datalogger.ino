@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.166
+    ver 1.2.167
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 2
-#define VER_BUILD 166
+#define VER_BUILD 167
 
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -56,6 +56,8 @@ float sensor_calibration[NUM_SENSORS];
 union Convert
 {
   uint8_t buf[4];
+  uint16_t nr_16;
+  uint32_t nr_32;
   float number;
 };
 
@@ -94,17 +96,20 @@ static uint32_t lastTempRequest = 0;
 static uint16_t delayInMillis = 750;
 
 // Variables for handling reading of the ADC
-const float InternalReferenceVoltage = 1.1;  // Actually not measured... yet
+const float InternalReferenceVoltage = 1.100;  // Actually not measured... yet
 const float ReferenceResistor = 1270.0;      // Actually not measured... yet
-static float AnalogReferenceVoltage = 3.3;   // Ideally it should be this...
+static float AnalogReferenceVoltage = 3.300;   // Ideally it should be this...
 static volatile uint16_t rawADC = 0;
-static float voltage_in = 0.0;
-static float solar_resistor = 0.0;
-static float solar_temp = 0.0;
+static volatile uint16_t adjusted_ADC = 0;
+static volatile uint32_t oversampled_ADC = 0;
+const uint8_t nr_oversamples = 16;
+static volatile uint8_t sample_counter = 0;
+static volatile float voltage_in = 0.0;
+static volatile float solar_resistor = 0.0;
+static volatile float solar_temp = 0.0;
 static volatile boolean solar_pump_on = false;
 static volatile boolean laddomat_on = false;
 static volatile boolean adcDone = false;
-static boolean adcStarted = false;
 
 /*
 // State machine declarations for SPI
@@ -477,7 +482,7 @@ ISR (SPI_STC_vect)
       break;
 
     case 0xF9:                        // Collect latest ADC sample
-      convert.number = voltage_in;
+      convert.nr_16 = rawADC;
       SPDR = convert.buf[0];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = convert.buf[1];
@@ -576,8 +581,15 @@ ISR (SPI_STC_vect)
 */
 ISR (ADC_vect)
 {
-  rawADC = ADC;
-  adcDone = true;
+  oversampled_ADC = oversampled_ADC + ADC;
+
+  if (++sample_counter >= nr_oversamples)
+  {
+    adcDone = true;
+    adjusted_ADC = (oversampled_ADC >> 2);
+    oversampled_ADC = 0;
+    sample_counter = 0;
+  }
 } // end of ADC ISR
 
 #if NUM_MEDIAN == 3
@@ -679,36 +691,39 @@ static uint8_t xfer(uint8_t data1, uint8_t data2)
   return clr;
 }
 
-static void determineAVcc()
+static void measureAVcc()
 {
-  // Select Bandgap voltage as source
-  ADMUX |= (1 << MUX3) | (1 << MUX2) | (1 << MUX1);
+  // Save the ADC state and MUX
+  uint8_t saveADCSRA = ADCSRA;
+  uint8_t saveADMUX = ADMUX;
 
-  // Turn off the interrupt
-  ADCSRA &= ~(1 << ADIE);
+  // Disable interrupt and auto trigger
+  ADCSRA &= ~((1 << ADIE) | (1 << ADATE));
 
-  while ((ADCSRA & (1 << ADSC)));       // Wait for the ADC to finish any ongoing conversion
+  // Clear and select AVcc as reference and Bandgap voltage as source
+  ADMUX = (1 << REFS0) | (1 << MUX3) | (1 << MUX2) | (1 << MUX1);
+
+  // Set prescaler to CLK/128 = 125kHz
+  ADCSRA |= (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
+
+  // Wait for the ADC to finish any previous conversion
+  while (!(ADCSRA & (1 << ADIF)));
+
+  // Wait for Vbg to stabilize
+  delayMicroseconds(350);
 
   // Clear the flag and start a new conversion
   ADCSRA |= (1 << ADSC) | (1 << ADIF);
 
   while (!(ADCSRA & (1 << ADIF)));       // Wait for the ADC to finish conversion
-  rawADC = ADC;                          // Throw away this value
-  ADCSRA |= (1 << ADSC) | (1 << ADIF);   // Clear flag and start new conversion
-  while (!(ADCSRA & (1 << ADIF)));       // Wait for the ADC to finish conversion
   rawADC = ADC;
 
   // Calculate the value of AVcc
-  AnalogReferenceVoltage = InternalReferenceVoltage / float(rawADC + 0.5) * 1024.0;
+  AnalogReferenceVoltage = InternalReferenceVoltage / (rawADC + 0.5) * 1024.0;
 
-  // Select ADC0 as source
-  ADMUX &= ~((1 << MUX3) | (1 << MUX2) | (1 << MUX1) | (1 << MUX0));
-
-  // Clear flag and enable interrupt again
-  ADCSRA |= (1 << ADIF) | (1 << ADIE);
-
-  adcDone = false;
-  adcStarted = false;
+  // Reset the ADC state
+  ADMUX = saveADMUX;
+  ADCSRA = saveADCSRA;
 }
 
 void setup()
@@ -717,26 +732,22 @@ void setup()
   // Disable all pull-ups
   MCUCR |= (1 << PUD);
 
-  // Set Port B1, B0 output
+  // Set Port B1, B0 output, solarpump relay
   DDRB |= (1 << DDB1) | (1 << DDB0);
 
-  // Set Port C0, C1, C2, C3 analog input
+  // Set Port C0, C1, C2, C3 analog input, disable digital buffers to save power
   DDRC &= ~((1 << DDC3) | (1 << DDC2) | (1 << DDC1) | (1 << DDC0));
   DIDR0 |= (1 << ADC3D) | (1 << ADC2D) | (1 << ADC1D) | (1 << ADC0D);
 
-  // Set Port D7, D6 output, sample_ready signal
+  // Set Port D7, D6 output, sample_ready signal and laddomat relay
   DDRD |= (1 << DDD7) | (1 << DDD6);
 
   // Initialize ADC
-  // Set Vref to AVcc, VBG selected initially
-  ADMUX |= (1 << REFS0) | (1 << MUX3) | (1 << MUX2) | (1 << MUX1);
+  // Clear ADMUX and set Vref to AVcc, ADC0 selected as source
+  ADMUX = (1 << REFS0);
 
-  // First clear prescaler
-  ADCSRA &= ~((1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0));
-
-  // ADC enable, start first conversion, enable interrupt, prescaler CLK/64 = 250kHz
-  ADCSRA |= (1 << ADEN) | (1 << ADSC) | (1 << ADIE) | (1 << ADPS2) | (1 << ADPS1);
-  adcStarted = true;
+  // ADC enable, start first conversion, enable interrupt, enable auto trigger, prescaler CLK/64 = 250kHz
+  ADCSRA = (1 << ADEN) | (1 << ADSC) | (1 << ADIE) | (1 << ADATE) | (1 << ADPS2) | (1 << ADPS1);
 
   // Initialize sensor calibration values from EEPROM
   for (uint8_t x = 0; x < NUM_SENSORS; x++)
@@ -837,7 +848,7 @@ void setup()
   xfer(176, 0);
 
   // Get a updated value of AVcc
-  determineAVcc();
+  measureAVcc();
 
 } // end of setup
 
@@ -975,23 +986,16 @@ void loop()
 
   if (adcDone)
   {
-    adcStarted = false;
     adcDone = false;
-    voltage_in = AnalogReferenceVoltage * float(rawADC + 0.5) / 1024.0;
-    solar_resistor = ReferenceResistor * (1.0 / ((AnalogReferenceVoltage / voltage_in) - 1.0));
+    voltage_in = AnalogReferenceVoltage * (adjusted_ADC + 1.5) / 4096.0;
+    solar_resistor = ReferenceResistor / ((4096.0 / (adjusted_ADC + 1.5)) - 1.0);
     solar_temp = (solar_resistor - 1000.0) / 3.75;
   }
 
-  if (!adcStarted)
-  {
-    adcStarted = true;
-    ADCSRA |= (1 << ADSC);
-  }
-
   if (laddomat_on)
-    PORTD |= (1 << PORTD6);     // Activate the solarpump relay
+    PORTD |= (1 << PORTD6);     // Activate the laddomat relay
   else
-    PORTD &= ~(1 << PORTD6);    // De-Activate the solarpump relay
+    PORTD &= ~(1 << PORTD6);    // De-Activate the laddomat relay
 
   if (solar_pump_on)
     PORTB |= (1 << PORTB1);     // Activate the solarpump relay
