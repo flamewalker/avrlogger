@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.167
+    ver 1.2.168
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 2
-#define VER_BUILD 167
+#define VER_BUILD 168
 
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -52,23 +52,16 @@ DeviceAddress tempsensor[] = {0x28, 0x2E, 0xE8, 0x1D, 0x07, 0x00, 0x00, 0x80,   
 
 float sensor_calibration[NUM_SENSORS];
 
-// A method for converting float to array of uint8_t and back
+// A method for converting numbers for transfer with SPI
 union Convert
 {
-  uint8_t buf[4];
+  uint8_t nr_8[4];
   uint16_t nr_16;
   uint32_t nr_32;
   float number;
 };
 
-union Split
-{
-  uint8_t buf[2];
-  int16_t number;
-};
-
 static volatile union Convert convert;
-static volatile union Split split;
 
 // Look-up table for controlling digipot to simulate 22K NTC between 26-98C
 const uint8_t temp[] = {16,   33,  52,  77,  94,
@@ -97,30 +90,21 @@ static uint16_t delayInMillis = 750;
 
 // Variables for handling reading of the ADC
 const float InternalReferenceVoltage = 1.100;  // Actually not measured... yet
-const float ReferenceResistor = 1270.0;      // Actually not measured... yet
-static float AnalogReferenceVoltage = 3.300;   // Ideally it should be this...
+const float ReferenceResistor = 1270.0;        // Actually not measured... yet
+static float AnalogReferenceVoltage = 3.300;   // Ideally it should be this... but we measure it later
 static volatile uint16_t rawADC = 0;
 static volatile uint16_t adjusted_ADC = 0;
 static volatile uint32_t oversampled_ADC = 0;
-const uint8_t nr_oversamples = 16;
+const uint8_t nr_oversamples = 16;             // Number of oversamples needed for 12 bit
 static volatile uint8_t sample_counter = 0;
 static volatile float voltage_in = 0.0;
 static volatile float solar_resistor = 0.0;
 static volatile float solar_temp = 0.0;
-static volatile boolean solar_pump_on = false;
-static volatile boolean laddomat_on = false;
 static volatile boolean adcDone = false;
 
-/*
-// State machine declarations for SPI
-enum SPIState
-{
-  SPI_IDLE,
-  SPI_DUMP
-};
-
-static volatile SPIState spi_state = SPI_IDLE;
-*/
+// Variables to control relays
+static volatile boolean solar_pump_on = false;
+static volatile boolean laddomat_on = false;
 
 // Buffer and variables for SPI -> TWI command transfer
 static volatile uint8_t spi_cmd[2] = { 0xDE, 0x64 };
@@ -455,13 +439,13 @@ ISR (SPI_STC_vect)
 
     case 0xF7:                        // Program sensor_calibration
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      convert.buf[0] = SPDR;
+      convert.nr_8[0] = SPDR;
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      convert.buf[1] = SPDR;
+      convert.nr_8[1] = SPDR;
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      convert.buf[2] = SPDR;
+      convert.nr_8[2] = SPDR;
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      convert.buf[3] = SPDR;
+      convert.nr_8[3] = SPDR;
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       sensor_calibration[SPDR] = convert.number;
       EEPROM.put((SPDR * sizeof(float)), sensor_calibration[SPDR]);
@@ -470,53 +454,53 @@ ISR (SPI_STC_vect)
     case 0xF8:                        // Read sensor_calibration
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       convert.number = sensor_calibration[SPDR];
-      SPDR = convert.buf[0];
+      SPDR = convert.nr_8[0];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.buf[1];
+      SPDR = convert.nr_8[1];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.buf[2];
+      SPDR = convert.nr_8[2];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.buf[3];
+      SPDR = convert.nr_8[3];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = 0xFF;                    // Access SPDR to clear SPIF
       break;
 
     case 0xF9:                        // Collect latest ADC sample
       convert.nr_16 = rawADC;
-      SPDR = convert.buf[0];
+      SPDR = convert.nr_8[0];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.buf[1];
+      SPDR = convert.nr_8[1];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.buf[2];
+      SPDR = convert.nr_8[2];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.buf[3];
+      SPDR = convert.nr_8[3];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       convert.number = AnalogReferenceVoltage;
-      SPDR = convert.buf[0];
+      SPDR = convert.nr_8[0];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.buf[1];
+      SPDR = convert.nr_8[1];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.buf[2];
+      SPDR = convert.nr_8[2];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.buf[3];
+      SPDR = convert.nr_8[3];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       convert.number = solar_resistor;
-      SPDR = convert.buf[0];
+      SPDR = convert.nr_8[0];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.buf[1];
+      SPDR = convert.nr_8[1];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.buf[2];
+      SPDR = convert.nr_8[2];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.buf[3];
+      SPDR = convert.nr_8[3];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       convert.number = solar_temp;
-      SPDR = convert.buf[0];
+      SPDR = convert.nr_8[0];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.buf[1];
+      SPDR = convert.nr_8[1];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.buf[2];
+      SPDR = convert.nr_8[2];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.buf[3];
+      SPDR = convert.nr_8[3];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = 0xFF;                    // Access SPDR to clear SPIF
       break;
@@ -775,9 +759,9 @@ void setup()
       }
       else
       {
-        split.number = (int16_t)lrintf(temperature);
-        templog[0xB0 + x * 2] = split.buf[0];                                   // Split into high and
-        templog[0xB1 + x * 2] = split.buf[1];					// low part of int
+        convert.nr_16 = (int16_t)lrintf(temperature);
+        templog[0xB0 + x * 2] = convert.nr_8[0];                              // Split into high and
+        templog[0xB1 + x * 2] = convert.nr_8[1];                              // low part of int
         datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
         datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
       }
@@ -897,9 +881,9 @@ void loop()
         }
         else
         {
-          split.number = (int16_t)lrintf(tempfiltered[x][3]);
-          templog[0xB0 + x * 2] = split.buf[0];					// Split into high and
-          templog[0xB1 + x * 2] = split.buf[1];					// low part of int
+          convert.nr_16 = (int16_t)lrintf(tempfiltered[x][3]);
+          templog[0xB0 + x * 2] = convert.nr_8[0];                                      // Split into high and
+          templog[0xB1 + x * 2] = convert.nr_8[1];                                      // low part of int
         }
       }
 /*      else
