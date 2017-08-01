@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.168
+    ver 1.2.169
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 2
-#define VER_BUILD 168
+#define VER_BUILD 169
 
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -21,7 +21,7 @@
 #define NUM_SENSORS 11
 
 // Basic array sizes, just need to add the number of connected OneWire sensors
-#define ARRAY_SIZE 0xB0 + NUM_SENSORS * 2
+#define ARRAY_SIZE 0xCD
 #define SAMPLE_SIZE 0xAD
 
 // TWI buffer length
@@ -101,6 +101,7 @@ static volatile float voltage_in = 0.0;
 static volatile float solar_resistor = 0.0;
 static volatile float solar_temp = 0.0;
 static volatile boolean adcDone = false;
+static uint8_t system_status = 0;
 
 // Variables to control relays
 static volatile boolean solar_pump_on = false;
@@ -974,7 +975,26 @@ void loop()
     voltage_in = AnalogReferenceVoltage * (adjusted_ADC + 1.5) / 4096.0;
     solar_resistor = ReferenceResistor / ((4096.0 / (adjusted_ADC + 1.5)) - 1.0);
     solar_temp = (solar_resistor - 1000.0) / 3.75;
+    solar_temp = lrintf(solar_temp * 10.0) * 0.1;     // Round to one decimal
+    templog[0xCA] = solar_temp;
+    templog[0xCB] = solar_temp * 100 - (uint8_t)solar_temp * 100;
   }
+
+  float tank1_lower = lrintf(tempfiltered[0][3] * 10.0) * 0.1;
+  float tank1_upper = lrintf(tempfiltered[1][3] * 10.0) * 0.1;
+
+  if ((solar_temp - tank1_lower) >= 10.0)
+    solar_pump_on = true;
+
+  if ((solar_temp - tank1_upper) <= 4.0)
+    solar_pump_on = false;
+
+  uint8_t check_dhw = lrintf(tempfiltered[3][3]);
+  if (check_dhw != dhw_ctc)
+    set_ctc_temp(check_dhw);
+
+  system_status = (laddomat_on << 1) | (solar_pump_on << 0);
+  templog[0xCC] = system_status;
 
   if (laddomat_on)
     PORTD |= (1 << PORTD6);     // Activate the laddomat relay
