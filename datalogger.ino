@@ -1,12 +1,13 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.172
+    ver 1.2.173
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 2
-#define VER_BUILD 172
+#define VER_BUILD 173
 
+#include <avr/pgmspace.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <EEPROM.h>
@@ -64,15 +65,15 @@ union Convert
 static volatile union Convert convert;
 
 // Look-up table for controlling digipot to simulate 22K NTC between 26-98C
-const uint8_t temp[] = {16,   33,  52,  77,  94,
-                        109, 124, 145, 165, 178, 196, 213, 224, 239, 249,
-                        5,    17,  26,  35,  43,  55,  62,  71,  77,  84,
-                        91,   97, 107, 113, 119, 125, 130, 136, 141, 147,
-                        154, 159, 164, 169, 173, 178, 182, 186, 189, 193,
-                        196, 199, 203, 206, 208, 212, 216, 219, 221, 222,
-                        226, 228, 229, 231, 233, 236, 237, 240, 242, 244,
-                        245, 247, 248, 250, 251, 251, 252, 254
-                       };
+const uint8_t temp[] PROGMEM = {16,   33,  52,  77,  94,
+                                109, 124, 145, 165, 178, 196, 213, 224, 239, 249,
+                                5,    17,  26,  35,  43,  55,  62,  71,  77,  84,
+                                91,   97, 107, 113, 119, 125, 130, 136, 141, 147,
+                                154, 159, 164, 169, 173, 178, 182, 186, 189, 193,
+                                196, 199, 203, 206, 208, 212, 216, 219, 221, 222,
+                                226, 228, 229, 231, 233, 236, 237, 240, 242, 244,
+                                245, 247, 248, 250, 251, 251, 252, 254
+                               };
 
 // Command buffer for DigiPot
 static volatile uint8_t digi_cmd[2] = {0, 0};
@@ -626,7 +627,7 @@ static void set_ctc_temp(uint8_t t)
   else if (t > 40)
   {
     dhw_ctc = t;
-    xfer(32, temp[t - 26] + dir); // Load input registers
+    xfer(32, pgm_read_byte_near(&temp[t - 26]) + dir); // Load input registers
     xfer(33, 255);
     xfer(104, 0);                 // Transfer input registers to RDACs
   }
@@ -634,7 +635,7 @@ static void set_ctc_temp(uint8_t t)
   {
     dhw_ctc = t;
     xfer(32, 0);                  // Load input registers
-    xfer(33, temp[t - 26] + dir);
+    xfer(33, pgm_read_byte_near(&temp[t - 26]) + dir);
     xfer(104, 0);                 // Transfer input registers to RDACs
   }
 }
