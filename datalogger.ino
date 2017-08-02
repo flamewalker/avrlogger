@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.171
+    ver 1.2.172
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 2
-#define VER_BUILD 171
+#define VER_BUILD 172
 
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -120,7 +120,7 @@ static volatile uint8_t datalog[ARRAY_SIZE];
 static volatile uint8_t templog[ARRAY_SIZE];
 
 // Debug vars
-static volatile uint8_t test1, test2, test3, test4, test6, test7, test8, slask_tx1, slask_tx2, slask_rx1, slask_rx2 = 0;
+static volatile uint8_t test1, test2, test3, test4 = 0;
 static volatile uint16_t test5 = 0;
 
 // Counter...
@@ -540,10 +540,6 @@ ISR (SPI_STC_vect)
       test1 = 0;
       test2 = 0;
       test3 = 0;
-      slask_tx1 = 0;
-      slask_tx2 = 0;
-      slask_rx1 = 0;
-      slask_rx2 = 0;
       twi_rxBuffer[2] = 0;
       twi_rxBuffer[3] = 0;
       SPDR = 0xAF;
@@ -897,6 +893,10 @@ void loop()
       if (checkforchange(0xB0 , 0xAF + NUM_SENSORS * 2))
         ow_sample_send = 128;
 
+    check_dhw = lrintf(tempfiltered[3][3]);
+    if (check_dhw != dhw_ctc)
+      set_ctc_temp(check_dhw);
+
     if (ow_sample_send != 0)
     {
       PORTD &= ~(1 << PORTD7);    // Set the Interrupt signal LOW
@@ -980,10 +980,6 @@ void loop()
     solar_pump_on = false;
   if ((solar_temp - tank1_lower) >= 10.0)
     solar_pump_on = true;
-
-  check_dhw = lrintf(tempfiltered[3][3]);
-  if (check_dhw != dhw_ctc)
-    set_ctc_temp(check_dhw);
 
   if (laddomat_on)
     PORTD |= (1 << PORTD6);     // Activate the laddomat relay
