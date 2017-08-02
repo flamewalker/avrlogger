@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.169
+    ver 1.2.171
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 2
-#define VER_BUILD 169
+#define VER_BUILD 171
 
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -79,6 +79,7 @@ static volatile uint8_t digi_cmd[2] = {0, 0};
 
 // Variable to hold actual temp of hot water
 static volatile uint8_t dhw_ctc = 75;
+static uint8_t check_dhw = 0;
 
 // Variables for handling sampling from OneWire sensors
 static float temperature, mediantemp = 0.0;
@@ -102,6 +103,8 @@ static volatile float solar_resistor = 0.0;
 static volatile float solar_temp = 0.0;
 static volatile boolean adcDone = false;
 static uint8_t system_status = 0;
+static float tank1_lower = 0.0;
+static float tank1_upper = 0.0;
 
 // Variables to control relays
 static volatile boolean solar_pump_on = false;
@@ -126,8 +129,8 @@ static volatile uint8_t count = 0;
 // Flags for sampling complete / available for transfer
 static volatile boolean twi_sample_done = false;
 static volatile boolean new_twi_sample, new_ow_sample = false;
-static volatile uint8_t twi_sample_send = B01111111;
-static volatile uint8_t ow_sample_send = B10000000;
+static volatile uint8_t twi_sample_send = 127;
+static volatile uint8_t ow_sample_send = 128;
 static volatile boolean start_sampling = true;
 static volatile boolean ok_sample_ow = false;
 
@@ -332,9 +335,10 @@ ISR (SPI_STC_vect)
 
         if (SPDR == 0xF0)
         {
-          SPDR = (test5 >> 8);             // Load with number of ow_samples we've collected since last time, MSByte
+          convert.nr_16 = test5;
+          SPDR = convert.nr_8[0];             // Load with number of ow_samples we've collected since last time, MSByte
           while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
-          SPDR = (test5 & 0xFF);           // Load with number of ow_samples we've collected since last time, LSByte
+          SPDR = convert.nr_8[1];           // Load with number of ow_samples we've collected since last time, LSByte
           while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
           SPDR = 0xFF;                     // Access SPDR to clear SPIF
           test5 = 0;
@@ -467,23 +471,9 @@ ISR (SPI_STC_vect)
       break;
 
     case 0xF9:                        // Collect latest ADC sample
-      convert.nr_16 = rawADC;
-      SPDR = convert.nr_8[0];
+      SPDR = solar_pump_on;
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.nr_8[1];
-      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.nr_8[2];
-      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.nr_8[3];
-      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      convert.number = AnalogReferenceVoltage;
-      SPDR = convert.nr_8[0];
-      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.nr_8[1];
-      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.nr_8[2];
-      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = convert.nr_8[3];
+      SPDR = laddomat_on;
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       convert.number = solar_resistor;
       SPDR = convert.nr_8[0];
@@ -790,6 +780,9 @@ void setup()
   sensors.requestTemperatures();
   lastTempRequest = millis();
 
+  tank1_lower = lrintf(tempfiltered[0][3] * 10.0) * 0.1;
+  tank1_upper = lrintf(tempfiltered[1][3] * 10.0) * 0.1;
+
   // Initialize all the interfaces
   // SPI slave interface to Raspberry Pi
   // Set Port B4 output, SPI MISO
@@ -902,7 +895,7 @@ void loop()
     // Check for change in ONEWIRE, normal every change of temp (could be ~750ms)
     if (sync)
       if (checkforchange(0xB0 , 0xAF + NUM_SENSORS * 2))
-        ow_sample_send = B10000000;
+        ow_sample_send = 128;
 
     if (ow_sample_send != 0)
     {
@@ -919,43 +912,43 @@ void loop()
 
     // Check for change in SYSTIME, normal every minute
     if (checkforchange(0x73 , 0x75))
-      twi_sample_send |= B00000001;
+      twi_sample_send |= 1;
 
     // Check for change in CURRENT, normal every change of temp
     if (checkforchange(0x8C , 0x99))
-      twi_sample_send |= B00000010;
+      twi_sample_send |= 2;
     if (checkforchange(0x9B , 0xA0))
-      twi_sample_send |= B00000010;
+      twi_sample_send |= 2;
     if (checkforchange(0xA8 , 0xAD))
-      twi_sample_send |= B00000010;
+      twi_sample_send |= 2;
 
     // Check for change in HISTORICAL, normal every hour and week
     if (checkforchange(0x76 , 0x7E))
-      twi_sample_send |= B00000100;
+      twi_sample_send |= 4;
     if (checkforchange(0x80 , 0x84))
-      twi_sample_send |= B00000100;
+      twi_sample_send |= 4;
     if (checkforchange(0x87 , 0x8B))
-      twi_sample_send |= B00000100;
+      twi_sample_send |= 4;
 
     // Check for change in SETTINGS, hardly ever any changes
     if (checkforchange(0x00 , 0x68))
-      twi_sample_send |= B00001000;
+      twi_sample_send |= 8;
 
     // Check for change in ALARMS, almost never ever any changes
     if (checkforchange(0xA1 , 0xA4))
-      twi_sample_send |= B00010000;
+      twi_sample_send |= 16;
 
     // Check for change in LAST_24H,  normal change once every hour
     if (checkforchange(0x85 , 0x86))
-      twi_sample_send |= B00100000;
+      twi_sample_send |= 32;
     if (checkforchange(0x7F , 0x7F))
-      twi_sample_send |= B00100000;
+      twi_sample_send |= 32;
 
     // Check for change in STATUS, normal change every minute
     if (checkforchange(0x9A , 0x9A))
-      twi_sample_send |= B01000000;
+      twi_sample_send |= 64;
     if (checkforchange(0xA5 , 0xA7))
-      twi_sample_send |= B01000000;
+      twi_sample_send |= 64;
 
     twi_sample_done = false;
     start_sampling = true;      // Go for another auto sample!
@@ -980,21 +973,17 @@ void loop()
     templog[0xCB] = solar_temp * 100 - (uint8_t)solar_temp * 100;
   }
 
-  float tank1_lower = lrintf(tempfiltered[0][3] * 10.0) * 0.1;
-  float tank1_upper = lrintf(tempfiltered[1][3] * 10.0) * 0.1;
+  tank1_lower = lrintf(tempfiltered[0][3] * 10.0) * 0.1;
+  tank1_upper = lrintf(tempfiltered[1][3] * 10.0) * 0.1;
 
+  if ((solar_temp - tank1_lower) <= 4.0)
+    solar_pump_on = false;
   if ((solar_temp - tank1_lower) >= 10.0)
     solar_pump_on = true;
 
-  if ((solar_temp - tank1_upper) <= 4.0)
-    solar_pump_on = false;
-
-  uint8_t check_dhw = lrintf(tempfiltered[3][3]);
+  check_dhw = lrintf(tempfiltered[3][3]);
   if (check_dhw != dhw_ctc)
     set_ctc_temp(check_dhw);
-
-  system_status = (laddomat_on << 1) | (solar_pump_on << 0);
-  templog[0xCC] = system_status;
 
   if (laddomat_on)
     PORTD |= (1 << PORTD6);     // Activate the laddomat relay
@@ -1006,4 +995,7 @@ void loop()
   else
     PORTB &= ~(1 << PORTB1);    // De-Activate the solarpump relay
 
+  system_status = (laddomat_on << 1) | (solar_pump_on << 0);
+  templog[0xCC] = system_status;
+  checkforchange(0xCA, 0xCC);
 } // end of loop
