@@ -26,7 +26,7 @@
 #define SAMPLE_SIZE 0xAD
 
 // TWI buffer length
-#define TWI_BUFFER_LENGTH 5
+#define TWI_BUFFER_LENGTH 6
 
 // Data wire is plugged into port 2 on the Arduino
 #define ONE_WIRE_BUS 2
@@ -80,7 +80,7 @@ static volatile uint8_t digi_cmd[2] = {0, 0};
 
 // Variable to hold actual temp of hot water
 static volatile uint8_t dhw_ctc = 75;
-static uint8_t check_dhw = 0;
+static uint8_t check_dhw = 75;
 
 // Variables for handling sampling from OneWire sensors
 static float temperature, mediantemp = 0.0;
@@ -88,17 +88,22 @@ static float temperature, mediantemp = 0.0;
 static float owtemp[NUM_SENSORS][4];
 static float tempfiltered[NUM_SENSORS][4];
 static uint32_t lastTempRequest = 0;
+static uint32_t lastCheck = 0;
 static uint16_t delayInMillis = 750;
+static uint16_t checkDelay = 1000;
 
 // Variables for handling reading of the ADC
 const float InternalReferenceVoltage = 1.100;  // Actually not measured... yet
 const float ReferenceResistor = 1270.0;        // Actually not measured... yet
 static float AnalogReferenceVoltage = 3.300;   // Ideally it should be this... but we measure it later
 static volatile uint16_t rawADC = 0;
-static volatile uint16_t adjusted_ADC = 0;
+static volatile uint32_t adjusted_ADC = 0;
 static volatile uint32_t oversampled_ADC = 0;
-const uint8_t nr_oversamples = 16;             // Number of oversamples needed for 12 bit
-static volatile uint8_t sample_counter = 0;
+const uint8_t nr_extra_bits = 2;                           // Number of additional bits over 10
+const uint16_t nr_oversamples = 1 << (nr_extra_bits * 2);  // Number of oversamples needed
+const uint32_t adc_divisor = 1024UL << nr_extra_bits;      // Divisor to be used
+const float lsb_adjust = (1 + nr_extra_bits) * 0.5;        // Adjustment since we cant reach max value
+static volatile uint16_t sample_counter = 0;
 static volatile float voltage_in = 0.0;
 static volatile float solar_resistor = 0.0;
 static volatile float solar_temp = 0.0;
@@ -106,6 +111,10 @@ static volatile boolean adcDone = false;
 static uint8_t system_status = 0;
 static float tank1_lower = 0.0;
 static float tank1_upper = 0.0;
+static float adctemp[4];
+static float adcfiltered[4];
+static uint32_t adc_lastCheck = 0;
+static uint16_t adc_checkDelay = 2000;
 
 // Variables to control relays
 static volatile boolean solar_pump_on = false;
@@ -121,22 +130,29 @@ static volatile uint8_t datalog[ARRAY_SIZE];
 static volatile uint8_t templog[ARRAY_SIZE];
 
 // Debug vars
-static volatile uint8_t test1, test2, test3, test4 = 0;
-static volatile uint16_t test5 = 0;
+static volatile uint8_t test1 = 0;
+static volatile uint8_t test2 = 0;
+static volatile uint8_t test3 = 0;
+static volatile uint32_t test4 = 0;
+static volatile uint32_t test5 = 0;
 
 // Counter...
 static volatile uint8_t count = 0;
 
 // Flags for sampling complete / available for transfer
 static volatile boolean twi_sample_done = false;
-static volatile boolean new_twi_sample, new_ow_sample = false;
-static volatile uint8_t twi_sample_send = 127;
-static volatile uint8_t ow_sample_send = 128;
+/*
+static volatile boolean new_twi_sample = false;
+static volatile boolean new_ow_sample = false;
+*/
+static volatile boolean new_sample = false;
+static volatile uint16_t sample_send = 0;
 static volatile boolean start_sampling = true;
 static volatile boolean ok_sample_ow = false;
 
 // Flags for contact with CTC Ecologic EXT
 static volatile boolean sync = false;
+static boolean first_run = true;
 
 // TWI vars
 static volatile uint8_t twi_txBuffer[2];
@@ -291,44 +307,37 @@ ISR (SPI_STC_vect)
     case 0xFF:                        // NO-OP/PING
       if (!sync)                      // Not in sync with TWI Master
         SPDR = 0x00;
-      else if (!new_twi_sample && !new_ow_sample)
-        SPDR = 0x01;                  // In sync with TWI Master, no new sample available
+//      else if (!new_twi_sample && !new_ow_sample)
+      else if (!new_sample)
+		SPDR = 0x01;                  // In sync with TWI Master, no new sample available
       break;
 
     case 0xF0:                        // Array transfer command
       if (!sync)                      // Not in sync with TWI Master
         SPDR = 0x00;
-      else if (!new_twi_sample && !new_ow_sample) // In sync with TWI Master, no new sample available
-        SPDR = 0x01;
+//      else if (!new_twi_sample && !new_ow_sample) // In sync with TWI Master, no new sample available
+      else if (!new_sample)
+		SPDR = 0x01;
       else
       {
+        PORTD &= ~(1 << PORTD7);     // Set the Interrupt signal LOW
         SPDR = 0xFA;
         while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
-        if (new_ow_sample)
-        {
-          SPDR = ow_sample_send;
-          while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
-          SPDR = 0xFD;                   // Access SPDR to clear SPIF
-          if (!new_twi_sample)
-            PORTD &= ~(1 << PORTD7);     // Set the Interrupt signal LOW
-        }
-        else if (new_twi_sample)
-        {
-          SPDR = twi_sample_send;
-          while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
-          SPDR = 0xFD;                   // Access SPDR to clear SPIF
-          if (!new_ow_sample)
-            PORTD &= ~(1 << PORTD7);     // Set the Interrupt signal LOW
-        }
-
+        convert.nr_16 = sample_send;
+        SPDR = convert.nr_8[0];
         while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
+        SPDR = convert.nr_8[1];
+        while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
+        SPDR = 0xFD;                   // Access SPDR to clear SPIF
+
+        while (!(SPSR & (1 << SPIF)));     // Wait for next byte from Master
 
         while (SPDR < ARRAY_SIZE)
         {
-          while (SPDR < ARRAY_SIZE)          // Continue as long we get requests within the array size
+          while (SPDR < ARRAY_SIZE)        // Continue as long we get requests within the array size
           {
             SPDR = datalog[SPDR];
-            while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+            while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
           }
 
           while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
@@ -336,27 +345,34 @@ ISR (SPI_STC_vect)
 
         if (SPDR == 0xF0)
         {
-          convert.nr_16 = test5;
-          SPDR = convert.nr_8[0];             // Load with number of ow_samples we've collected since last time, MSByte
+          convert.nr_32 = test5;
+          SPDR = convert.nr_8[0];          // Load with number of ow_samples we've collected since last time, MSByte
           while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
-          SPDR = convert.nr_8[1];           // Load with number of ow_samples we've collected since last time, LSByte
+          SPDR = convert.nr_8[1];          // Load with number of ow_samples we've collected since last time, LSByte
           while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
-          SPDR = 0xFF;                     // Access SPDR to clear SPIF
-          test5 = 0;
-          new_ow_sample = false;
-          ow_sample_send = 0;              // Reset now that we've sent everything
-          break;
+          SPDR = convert.nr_8[2];          // Load with number of ow_samples we've collected since last time, LSByte
+          while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+          SPDR = convert.nr_8[3];          // Load with number of ow_samples we've collected since last time, LSByte
+          while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+          //new_ow_sample = false;
         }
+
         if (SPDR == 0xF1)
         {
-          SPDR = test4;                    // Load with number of twi_samples we've collected since last time
+          convert.nr_32 = test4;
+          SPDR = convert.nr_8[0];          // Load with number of twi_samples we've collected since last time
           while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
-          SPDR = 0xFF;                     // Access SPDR to clear SPIF
-          test4 = 0;
-          new_twi_sample = false;
-          twi_sample_send = 0;             // Reset now that we've sent everything
-          break;
+          SPDR = convert.nr_8[1];          // Load with number of twi_samples we've collected since last time
+          while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+          SPDR = convert.nr_8[2];          // Load with number of twi_samples we've collected since last time
+          while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+          SPDR = convert.nr_8[3];          // Load with number of twi_samples we've collected since last time
+          while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+          //new_twi_sample = false;
         }
+	new_sample = false;
+	sample_send = 0;                   // Reset now that we have sent everything
+        SPDR = 0xFF;                       // Access SPDR to clear SPIF
       }
       break;
 
@@ -437,7 +453,8 @@ ISR (SPI_STC_vect)
       TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT) | (1 << TWEA) | (1 << TWSTO);
       if (!sync)                      // Not in sync with TWI Master
         SPDR = 0x00;
-      else if (!new_twi_sample && !new_ow_sample)
+//      else if (!new_twi_sample && !new_ow_sample)
+	  else if (!new_sample)
         SPDR = 0x01;                  // In sync with TWI Master, no new sample available
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = 0xFF;                    // Access SPDR to clear SPIF
@@ -553,12 +570,12 @@ ISR (SPI_STC_vect)
 */
 ISR (ADC_vect)
 {
-  oversampled_ADC = oversampled_ADC + ADC;
+  oversampled_ADC += ADC;
 
   if (++sample_counter >= nr_oversamples)
   {
     adcDone = true;
-    adjusted_ADC = (oversampled_ADC >> 2);
+    adjusted_ADC = (oversampled_ADC >> nr_extra_bits);
     oversampled_ADC = 0;
     sample_counter = 0;
   }
@@ -718,8 +735,8 @@ void setup()
   // Clear ADMUX and set Vref to AVcc, ADC0 selected as source
   ADMUX = (1 << REFS0);
 
-  // ADC enable, start first conversion, enable interrupt, enable auto trigger, prescaler CLK/64 = 250kHz
-  ADCSRA = (1 << ADEN) | (1 << ADSC) | (1 << ADIE) | (1 << ADATE) | (1 << ADPS2) | (1 << ADPS1);
+  // ADC enable, start first conversion, enable interrupt, enable auto trigger, prescaler CLK/32 = 500kHz
+  ADCSRA = (1 << ADEN) | (1 << ADSC) | (1 << ADIE) | (1 << ADATE) | (1 << ADPS2) | (1 << ADPS0);
 
   // Initialize sensor calibration values from EEPROM
   for (uint8_t x = 0; x < NUM_SENSORS; x++)
@@ -779,6 +796,7 @@ void setup()
 
   tank1_lower = lrintf(tempfiltered[0][3] * 10.0) * 0.1;
   tank1_upper = lrintf(tempfiltered[1][3] * 10.0) * 0.1;
+  check_dhw = lrintf(tempfiltered[3][3]);
 
   // Initialize all the interfaces
   // SPI slave interface to Raspberry Pi
@@ -829,7 +847,7 @@ void setup()
 
 void loop()
 {
-  if (ok_sample_ow & (millis() - lastTempRequest) >= delayInMillis)
+  if (ok_sample_ow && (millis() - lastTempRequest) >= delayInMillis)
   {
     for (uint8_t x = 0; x < NUM_SENSORS; x++)
     {
@@ -892,18 +910,20 @@ void loop()
     // Check for change in ONEWIRE, normal every change of temp (could be ~750ms)
     if (sync)
       if (checkforchange(0xB0 , 0xAF + NUM_SENSORS * 2))
-        ow_sample_send = 128;
+        sample_send |= 128;
 
+    tank1_lower = lrintf(tempfiltered[0][3] * 10.0) * 0.1;
+    tank1_upper = lrintf(tempfiltered[1][3] * 10.0) * 0.1;
     check_dhw = lrintf(tempfiltered[3][3]);
-    if (check_dhw != dhw_ctc)
-      set_ctc_temp(check_dhw);
 
-    if (ow_sample_send != 0)
+  /*
+    if (sample_send != 0)
     {
       PORTD &= ~(1 << PORTD7);    // Set the Interrupt signal LOW
       new_ow_sample = true;
       PORTD |= (1 << PORTD7);     // Set the Interrupt signal HIGH
     }
+	*/
   }
 
   // Start checking the status of the newly taken sample versus the last sent
@@ -913,86 +933,125 @@ void loop()
 
     // Check for change in SYSTIME, normal every minute
     if (checkforchange(0x73 , 0x75))
-      twi_sample_send |= 1;
+      sample_send |= 1;
 
     // Check for change in CURRENT, normal every change of temp
     if (checkforchange(0x8C , 0x99))
-      twi_sample_send |= 2;
+      sample_send |= 2;
     if (checkforchange(0x9B , 0xA0))
-      twi_sample_send |= 2;
+      sample_send |= 2;
     if (checkforchange(0xA8 , 0xAD))
-      twi_sample_send |= 2;
+      sample_send |= 2;
 
     // Check for change in HISTORICAL, normal every hour and week
     if (checkforchange(0x76 , 0x7E))
-      twi_sample_send |= 4;
+      sample_send |= 4;
     if (checkforchange(0x80 , 0x84))
-      twi_sample_send |= 4;
+      sample_send |= 4;
     if (checkforchange(0x87 , 0x8B))
-      twi_sample_send |= 4;
+      sample_send |= 4;
 
     // Check for change in SETTINGS, hardly ever any changes
     if (checkforchange(0x00 , 0x68))
-      twi_sample_send |= 8;
+      sample_send |= 8;
 
     // Check for change in ALARMS, almost never ever any changes
     if (checkforchange(0xA1 , 0xA4))
-      twi_sample_send |= 16;
+      sample_send |= 16;
 
     // Check for change in LAST_24H,  normal change once every hour
     if (checkforchange(0x85 , 0x86))
-      twi_sample_send |= 32;
+      sample_send |= 32;
     if (checkforchange(0x7F , 0x7F))
-      twi_sample_send |= 32;
+      sample_send |= 32;
 
     // Check for change in STATUS, normal change every minute
     if (checkforchange(0x9A , 0x9A))
-      twi_sample_send |= 64;
+      sample_send |= 64;
     if (checkforchange(0xA5 , 0xA7))
-      twi_sample_send |= 64;
+      sample_send |= 64;
 
     twi_sample_done = false;
     start_sampling = true;      // Go for another auto sample!
     test4++;                    // Increment the sample counter
 
-    if (twi_sample_send != 0)
+    if (sample_send & 127)
+      first_run = false;
+
+	/*
+    if (sample_send != 0)
     {
       PORTD &= ~(1 << PORTD7);    // Set the Interrupt signal LOW
       new_twi_sample = true;
       PORTD |= (1 << PORTD7);     // Set the Interrupt signal HIGH
     }
+	*/
   }
 
   if (adcDone)
   {
     adcDone = false;
-    voltage_in = AnalogReferenceVoltage * (adjusted_ADC + 1.5) / 4096.0;
-    solar_resistor = ReferenceResistor / ((4096.0 / (adjusted_ADC + 1.5)) - 1.0);
+    voltage_in = AnalogReferenceVoltage * (adjusted_ADC + lsb_adjust) / adc_divisor;
+    solar_resistor = ReferenceResistor / ((adc_divisor / (adjusted_ADC + lsb_adjust)) - 1.0);
     solar_temp = (solar_resistor - 1000.0) / 3.75;
-    solar_temp = lrintf(solar_temp * 10.0) * 0.1;     // Round to one decimal
+
+    // Input for filter
+    adctemp[0] = adctemp[1];
+    adctemp[1] = adctemp[2];
+    adctemp[2] = adctemp[3];
+    adctemp[3] = solar_temp;
+
+    // Butterworth filter with cutoff frequency 0.01*sample frequency (FS=1.33Hz)
+    adcfiltered[0] = adcfiltered[1];
+    adcfiltered[1] = adcfiltered[2];
+    adcfiltered[2] = adcfiltered[3];
+
+    adcfiltered[3] = (adctemp[0] + adctemp[3] + 3 * (adctemp[1] + adctemp[2])) / 3.430944333e+04 + (0.8818931306 * adcfiltered[0]) + (-2.7564831952 * adcfiltered[1]) + (2.8743568927 * adcfiltered[2]);
+
+    solar_temp = lrintf(adcfiltered[3] * 10.0) * 0.1;     // Round to one decimal
     templog[0xCA] = solar_temp;
     templog[0xCB] = solar_temp * 100 - (uint8_t)solar_temp * 100;
   }
 
-  tank1_lower = lrintf(tempfiltered[0][3] * 10.0) * 0.1;
-  tank1_upper = lrintf(tempfiltered[1][3] * 10.0) * 0.1;
-
-  if ((solar_temp - tank1_lower) <= 4.0)
-    solar_pump_on = false;
-  if ((solar_temp - tank1_lower) >= 10.0)
-    solar_pump_on = true;
-
-  if (laddomat_on)
-    PORTD |= (1 << PORTD6);     // Activate the laddomat relay
-  else
-    PORTD &= ~(1 << PORTD6);    // De-Activate the laddomat relay
-
-  if (solar_pump_on)
-    PORTB |= (1 << PORTB1);     // Activate the solarpump relay
-  else
-    PORTB &= ~(1 << PORTB1);    // De-Activate the solarpump relay
-
   system_status = (laddomat_on << 1) | (solar_pump_on << 0);
   templog[0xCC] = system_status;
-  checkforchange(0xCA, 0xCC);
+
+  if ((millis() - lastCheck) >= checkDelay)
+  {
+    lastCheck = millis();
+
+    if ((solar_temp - tank1_lower) <= 4.0)
+      solar_pump_on = false;
+
+    if ((solar_temp - tank1_lower) >= 10.0)
+      solar_pump_on = true;
+
+    if (check_dhw != dhw_ctc)
+      set_ctc_temp(check_dhw);
+
+    if (laddomat_on)
+      PORTD |= (1 << PORTD6);     // Activate the laddomat relay
+    else
+      PORTD &= ~(1 << PORTD6);    // De-Activate the laddomat relay
+
+    if (solar_pump_on)
+      PORTB |= (1 << PORTB1);     // Activate the solarpump relay
+    else
+      PORTB &= ~(1 << PORTB1);    // De-Activate the solarpump relay
+
+    if (sample_send != 0)
+    {
+      new_sample = true;
+      PORTD |= (1 << PORTD7);     // Set the Interrupt signal HIGH
+    }
+  }
+
+  if (!first_run)
+    if ((millis() - adc_lastCheck) >= adc_checkDelay)
+    {
+      adc_lastCheck = millis();
+
+      if (checkforchange(0xCA, 0xCC))
+        sample_send |= 256;
+    }
 } // end of loop
