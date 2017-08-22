@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.173
+    ver 1.2.174
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 2
-#define VER_BUILD 173
+#define VER_BUILD 174
 
 #include <avr/pgmspace.h>
 #include <OneWire.h>
@@ -88,6 +88,7 @@ static float temperature, mediantemp = 0.0;
 static float owtemp[NUM_SENSORS][4];
 static float tempfiltered[NUM_SENSORS][4];
 static uint32_t lastTempRequest = 0;
+static uint32_t time_now = 0;
 static uint32_t lastCheck = 0;
 static uint16_t delayInMillis = 750;
 static uint16_t checkDelay = 1000;
@@ -574,6 +575,7 @@ ISR (ADC_vect)
 
   if (++sample_counter >= nr_oversamples)
   {
+//    ADCSRA &= ~(1 << ADATE);
     adcDone = true;
     adjusted_ADC = (oversampled_ADC >> nr_extra_bits);
     oversampled_ADC = 0;
@@ -792,7 +794,8 @@ void setup()
   }
   sensors.setWaitForConversion(false);        // Now that we have a starting value in the array we don't have to wait for conversions anymore
   sensors.requestTemperatures();
-  lastTempRequest = millis();
+  time_now = millis();
+  lastTempRequest = time_now;
 
   tank1_lower = lrintf(tempfiltered[0][3] * 10.0) * 0.1;
   tank1_upper = lrintf(tempfiltered[1][3] * 10.0) * 0.1;
@@ -847,7 +850,9 @@ void setup()
 
 void loop()
 {
-  if (ok_sample_ow && (millis() - lastTempRequest) >= delayInMillis)
+  time_now = millis();
+
+  if (ok_sample_ow && (time_now - lastTempRequest) >= delayInMillis)
   {
     for (uint8_t x = 0; x < NUM_SENSORS; x++)
     {
@@ -903,7 +908,7 @@ void loop()
 */
     }
     sensors.requestTemperatures();
-    lastTempRequest = millis();
+    lastTempRequest = time_now;
     test5++;
     ok_sample_ow = false;
 
@@ -1016,9 +1021,20 @@ void loop()
   system_status = (laddomat_on << 1) | (solar_pump_on << 0);
   templog[0xCC] = system_status;
 
-  if ((millis() - lastCheck) >= checkDelay)
+  if (!first_run)
+    if ((time_now - adc_lastCheck) >= adc_checkDelay)
+    {
+      adc_lastCheck = time_now;
+
+      if (checkforchange(0xCA, 0xCC))
+        sample_send |= 256;
+    }
+
+  if ((time_now - lastCheck) >= checkDelay)
   {
-    lastCheck = millis();
+    lastCheck = time_now;
+
+//    ADCSRA |= (1 << ADSC) | (1 << ADATE);
 
     if ((solar_temp - tank1_lower) <= 4.0)
       solar_pump_on = false;
@@ -1045,13 +1061,4 @@ void loop()
       PORTD |= (1 << PORTD7);     // Set the Interrupt signal HIGH
     }
   }
-
-  if (!first_run)
-    if ((millis() - adc_lastCheck) >= adc_checkDelay)
-    {
-      adc_lastCheck = millis();
-
-      if (checkforchange(0xCA, 0xCC))
-        sample_send |= 256;
-    }
 } // end of loop
