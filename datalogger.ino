@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.174
+    ver 1.2.175
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 2
-#define VER_BUILD 174
+#define VER_BUILD 175
 
 #include <avr/pgmspace.h>
 #include <OneWire.h>
@@ -512,6 +512,15 @@ ISR (SPI_STC_vect)
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = convert.nr_8[3];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.number = AnalogReferenceVoltage;
+      SPDR = convert.nr_8[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[2];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[3];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = 0xFF;                    // Access SPDR to clear SPIF
       break;
 
@@ -575,7 +584,7 @@ ISR (ADC_vect)
 
   if (++sample_counter >= nr_oversamples)
   {
-//    ADCSRA &= ~(1 << ADATE);
+    ADCSRA &= ~((1 << ADATE) | (1 << ADIE));
     adcDone = true;
     adjusted_ADC = (oversampled_ADC >> nr_extra_bits);
     oversampled_ADC = 0;
@@ -698,7 +707,7 @@ static void measureAVcc()
   ADCSRA |= (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
 
   // Wait for the ADC to finish any previous conversion
-  while (!(ADCSRA & (1 << ADIF)));
+  while ((ADCSRA & (1 << ADSC)));
 
   // Wait for Vbg to stabilize
   delayMicroseconds(350);
@@ -737,8 +746,8 @@ void setup()
   // Clear ADMUX and set Vref to AVcc, ADC0 selected as source
   ADMUX = (1 << REFS0);
 
-  // ADC enable, start first conversion, enable interrupt, enable auto trigger, prescaler CLK/32 = 500kHz
-  ADCSRA = (1 << ADEN) | (1 << ADSC) | (1 << ADIE) | (1 << ADATE) | (1 << ADPS2) | (1 << ADPS0);
+  // ADC enable, start first conversion, prescaler CLK/32 = 500kHz
+  ADCSRA = (1 << ADEN) | (1 << ADSC) | (1 << ADPS2) | (1 << ADPS0);
 
   // Initialize sensor calibration values from EEPROM
   for (uint8_t x = 0; x < NUM_SENSORS; x++)
@@ -843,6 +852,24 @@ void setup()
   // Command DigiPot RESET (command number 14)
   xfer(176, 0);
 
+  // Wait for the ADC to finish the first conversion
+  while ((ADCSRA & (1 << ADSC)));
+
+  solar_resistor = ReferenceResistor / ((1024.0 / (ADC + 0.5)) - 1.0);
+  solar_temp = (solar_resistor - 1000.0) / 3.75;
+
+  // Input for filter
+  adctemp[0] = solar_temp;
+  adctemp[1] = solar_temp;
+  adctemp[2] = solar_temp;
+  adctemp[3] = solar_temp;
+
+  // Butterworth filter with cutoff frequency 0.01*sample frequency (FS=1.33Hz)
+  adcfiltered[0] = solar_temp;
+  adcfiltered[1] = solar_temp;
+  adcfiltered[2] = solar_temp;
+  adcfiltered[3] = solar_temp;
+
   // Get a updated value of AVcc
   measureAVcc();
 
@@ -920,15 +947,6 @@ void loop()
     tank1_lower = lrintf(tempfiltered[0][3] * 10.0) * 0.1;
     tank1_upper = lrintf(tempfiltered[1][3] * 10.0) * 0.1;
     check_dhw = lrintf(tempfiltered[3][3]);
-
-  /*
-    if (sample_send != 0)
-    {
-      PORTD &= ~(1 << PORTD7);    // Set the Interrupt signal LOW
-      new_ow_sample = true;
-      PORTD |= (1 << PORTD7);     // Set the Interrupt signal HIGH
-    }
-	*/
   }
 
   // Start checking the status of the newly taken sample versus the last sent
@@ -982,15 +1000,6 @@ void loop()
 
     if (sample_send & 127)
       first_run = false;
-
-	/*
-    if (sample_send != 0)
-    {
-      PORTD &= ~(1 << PORTD7);    // Set the Interrupt signal LOW
-      new_twi_sample = true;
-      PORTD |= (1 << PORTD7);     // Set the Interrupt signal HIGH
-    }
-	*/
   }
 
   if (adcDone)
@@ -1034,7 +1043,7 @@ void loop()
   {
     lastCheck = time_now;
 
-//    ADCSRA |= (1 << ADSC) | (1 << ADATE);
+    ADCSRA |= (1 << ADSC) | (1 << ADATE) | (1 << ADIE);
 
     if ((solar_temp - tank1_lower) <= 4.0)
       solar_pump_on = false;
