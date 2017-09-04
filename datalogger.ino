@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.175
+    ver 1.2.176
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 2
-#define VER_BUILD 175
+#define VER_BUILD 176
 
 #include <avr/pgmspace.h>
 #include <OneWire.h>
@@ -96,7 +96,7 @@ static uint16_t checkDelay = 1000;
 // Variables for handling reading of the ADC
 const float InternalReferenceVoltage = 1.100;  // Actually not measured... yet
 const float ReferenceResistor = 1270.0;        // Actually not measured... yet
-static float AnalogReferenceVoltage = 3.300;   // Ideally it should be this... but we measure it later
+static volatile float AnalogReferenceVoltage = 3.300;   // Ideally it should be this... but we measure it later
 static volatile uint16_t rawADC = 0;
 static volatile uint32_t adjusted_ADC = 0;
 static volatile uint32_t oversampled_ADC = 0;
@@ -150,6 +150,9 @@ static volatile boolean new_sample = false;
 static volatile uint16_t sample_send = 0;
 static volatile boolean start_sampling = true;
 static volatile boolean ok_sample_ow = false;
+static uint32_t twi_lastCheck = 0;
+static uint16_t twi_sampletime = 0;
+static volatile uint16_t twi_accum_time = 0;
 
 // Flags for contact with CTC Ecologic EXT
 static volatile boolean sync = false;
@@ -521,6 +524,11 @@ ISR (SPI_STC_vect)
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = convert.nr_8[3];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.nr_16 = twi_accum_time;
+      SPDR = convert.nr_8[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = 0xFF;                    // Access SPDR to clear SPIF
       break;
 
@@ -873,11 +881,77 @@ void setup()
   // Get a updated value of AVcc
   measureAVcc();
 
+  // Initialize the timekeeping vars
+  time_now = millis();
+  lastTempRequest = time_now;
+  adc_lastCheck = time_now;
+  lastCheck = time_now;
+  twi_lastCheck = time_now;
 } // end of setup
 
 void loop()
 {
   time_now = millis();
+
+  // Start checking the status of the newly taken sample versus the last sent
+  if (twi_sample_done)
+  {
+    ok_sample_ow = true;
+
+    twi_sampletime = time_now - twi_lastCheck;
+    if (twi_sampletime > 0)
+      twi_accum_time = (twi_accum_time + twi_sampletime) * 0.5;
+    else
+      twi_accum_time = twi_sampletime;
+
+    // Check for change in SYSTIME, normal every minute
+    if (checkforchange(0x73 , 0x75))
+      sample_send |= 1;
+
+    // Check for change in CURRENT, normal every change of temp
+    if (checkforchange(0x8C , 0x99))
+      sample_send |= 2;
+    if (checkforchange(0x9B , 0xA0))
+      sample_send |= 2;
+    if (checkforchange(0xA8 , 0xAD))
+      sample_send |= 2;
+
+    // Check for change in HISTORICAL, normal every hour and week
+    if (checkforchange(0x76 , 0x7E))
+      sample_send |= 4;
+    if (checkforchange(0x80 , 0x84))
+      sample_send |= 4;
+    if (checkforchange(0x87 , 0x8B))
+      sample_send |= 4;
+
+    // Check for change in SETTINGS, hardly ever any changes
+    if (checkforchange(0x00 , 0x68))
+      sample_send |= 8;
+
+    // Check for change in ALARMS, almost never ever any changes
+    if (checkforchange(0xA1 , 0xA4))
+      sample_send |= 16;
+
+    // Check for change in LAST_24H,  normal change once every hour
+    if (checkforchange(0x85 , 0x86))
+      sample_send |= 32;
+    if (checkforchange(0x7F , 0x7F))
+      sample_send |= 32;
+
+    // Check for change in STATUS, normal change every minute
+    if (checkforchange(0x9A , 0x9A))
+      sample_send |= 64;
+    if (checkforchange(0xA5 , 0xA7))
+      sample_send |= 64;
+
+    twi_sample_done = false;
+    twi_lastCheck = millis();
+    start_sampling = true;      // Go for another auto sample!
+    test4++;                    // Increment the sample counter
+
+    if (sample_send & 127)
+      first_run = false;
+  }
 
   if (ok_sample_ow && (time_now - lastTempRequest) >= delayInMillis)
   {
@@ -947,59 +1021,6 @@ void loop()
     tank1_lower = lrintf(tempfiltered[0][3] * 10.0) * 0.1;
     tank1_upper = lrintf(tempfiltered[1][3] * 10.0) * 0.1;
     check_dhw = lrintf(tempfiltered[3][3]);
-  }
-
-  // Start checking the status of the newly taken sample versus the last sent
-  if (twi_sample_done)
-  {
-    ok_sample_ow = true;
-
-    // Check for change in SYSTIME, normal every minute
-    if (checkforchange(0x73 , 0x75))
-      sample_send |= 1;
-
-    // Check for change in CURRENT, normal every change of temp
-    if (checkforchange(0x8C , 0x99))
-      sample_send |= 2;
-    if (checkforchange(0x9B , 0xA0))
-      sample_send |= 2;
-    if (checkforchange(0xA8 , 0xAD))
-      sample_send |= 2;
-
-    // Check for change in HISTORICAL, normal every hour and week
-    if (checkforchange(0x76 , 0x7E))
-      sample_send |= 4;
-    if (checkforchange(0x80 , 0x84))
-      sample_send |= 4;
-    if (checkforchange(0x87 , 0x8B))
-      sample_send |= 4;
-
-    // Check for change in SETTINGS, hardly ever any changes
-    if (checkforchange(0x00 , 0x68))
-      sample_send |= 8;
-
-    // Check for change in ALARMS, almost never ever any changes
-    if (checkforchange(0xA1 , 0xA4))
-      sample_send |= 16;
-
-    // Check for change in LAST_24H,  normal change once every hour
-    if (checkforchange(0x85 , 0x86))
-      sample_send |= 32;
-    if (checkforchange(0x7F , 0x7F))
-      sample_send |= 32;
-
-    // Check for change in STATUS, normal change every minute
-    if (checkforchange(0x9A , 0x9A))
-      sample_send |= 64;
-    if (checkforchange(0xA5 , 0xA7))
-      sample_send |= 64;
-
-    twi_sample_done = false;
-    start_sampling = true;      // Go for another auto sample!
-    test4++;                    // Increment the sample counter
-
-    if (sample_send & 127)
-      first_run = false;
   }
 
   if (adcDone)
