@@ -1,13 +1,14 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.3.1
+    ver 1.3.2
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 3
-#define VER_BUILD 1
+#define VER_BUILD 2
 
 #include <avr/pgmspace.h>
+#include <avr/wdt.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <EEPROM.h>
@@ -109,9 +110,11 @@ static volatile float voltage_in = 0.0;
 static volatile float solar_resistor = 0.0;
 static volatile float solar_temp = 0.0;
 static volatile boolean adcDone = false;
-static uint8_t system_status = 0;
 static float tank1_lower = 0.0;
 static float tank1_upper = 0.0;
+static float wood_burner_in = 0.0;
+static float wood_burner_out = 0.0;
+static int16_t wood_burner_smoke = 0;
 static float adctemp[4];
 static float adcfiltered[4];
 static uint32_t adc_lastCheck = 0;
@@ -142,10 +145,6 @@ static volatile uint8_t count = 0;
 
 // Flags for sampling complete / available for transfer
 static volatile boolean twi_sample_done = false;
-/*
-static volatile boolean new_twi_sample = false;
-static volatile boolean new_ow_sample = false;
-*/
 static volatile boolean new_sample = false;
 static volatile uint16_t sample_send = 0;
 static volatile boolean start_sampling = true;
@@ -349,6 +348,10 @@ ISR (SPI_STC_vect)
         new_sample = false;
         sample_send = 0;                   // Reset now that we have sent everything
 
+        // Reset the upper bits of system status flags
+        templog[0xCC] &= ~240;
+        datalog[0xCC] = templog[0xCC];
+
         // Send test5
         convert.nr_32 = test5;
         SPDR = convert.nr_8[0];          // Load with number of ow_samples we've collected since last time, MSByte
@@ -370,6 +373,23 @@ ISR (SPI_STC_vect)
         while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
         SPDR = convert.nr_8[3];          // Load with number of twi_samples we've collected since last time
         while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+
+        // Send twi timing vars
+        convert.nr_16 = twi_min_time;
+        SPDR = convert.nr_8[0];
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+        SPDR = convert.nr_8[1];
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+        convert.nr_16 = twi_max_time;
+        SPDR = convert.nr_8[0];
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+        SPDR = convert.nr_8[1];
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+        convert.nr_16 = twi_accum_time;
+        SPDR = convert.nr_8[0];
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+        SPDR = convert.nr_8[1];
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
 
         // Send test2
         SPDR = test2;                   // Bitflags of TWI error conditions
@@ -419,6 +439,8 @@ ISR (SPI_STC_vect)
       SPDR = VER_MINOR;
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = VER_BUILD;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = templog[0xCC];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = 0xD4;                    // Access SPDR to clear SPIF
       break;
@@ -496,7 +518,7 @@ ISR (SPI_STC_vect)
       SPDR = 0xD8;                    // Access SPDR to clear SPIF
       break;
 
-    case 0xF9:                        // Collect latest ADC sample
+    case 0xF9:                        // Collect debug variables
       convert.nr_16 = twi_min_time;
       SPDR = convert.nr_8[0];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
@@ -583,6 +605,13 @@ ISR (SPI_STC_vect)
       SPDR = test2;                   // Bitflags of TWI error conditions
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = 0xB1;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xA2:
+      twi_min_time = 3000;
+      twi_max_time = 2000;
+      twi_accum_time = 0;
+      SPDR = 0xB2;
       break;
 
     case 0xAF:
@@ -752,6 +781,13 @@ static void measureAVcc()
 
 void setup()
 {
+  // Check the reset cause
+  templog[0xCC] = (MCUSR << 4);
+  MCUSR = 0;
+
+  // Initialize WDT
+  wdt_enable(WDTO_8S);
+
   // Initialize ports
   // Disable all pull-ups
   MCUCR |= (1 << PUD);
@@ -833,6 +869,9 @@ void setup()
   tank1_lower = lrintf(tempfiltered[0][3] * 10.0) * 0.1;
   tank1_upper = lrintf(tempfiltered[1][3] * 10.0) * 0.1;
   check_dhw = lrintf(tempfiltered[3][3]);
+  wood_burner_in = lrintf(tempfiltered[6][3] * 10.0) * 0.1;
+  wood_burner_out = lrintf(tempfiltered[7][3] * 10.0) * 0.1;
+  wood_burner_smoke = (int16_t)lrintf(tempfiltered[10][3]);
 
   // Initialize all the interfaces
   // SPI slave interface to Raspberry Pi
@@ -881,6 +920,11 @@ void setup()
 
   solar_resistor = ReferenceResistor / ((1024.0 / (ADC + 0.5)) - 1.0);
   solar_temp = (solar_resistor - 1000.0) / 3.75;
+
+  templog[0xCA] = solar_temp;
+  templog[0xCB] = solar_temp * 100 - (uint8_t)solar_temp * 100;
+  datalog[0xCA] = templog[0xCA];
+  datalog[0xCB] = templog[0xCB];
 
   // Input for filter
   adctemp[0] = solar_temp;
@@ -1043,6 +1087,9 @@ void loop()
     tank1_lower = lrintf(tempfiltered[0][3] * 10.0) * 0.1;
     tank1_upper = lrintf(tempfiltered[1][3] * 10.0) * 0.1;
     check_dhw = lrintf(tempfiltered[3][3]);
+    wood_burner_in = lrintf(tempfiltered[6][3] * 10.0) * 0.1;
+    wood_burner_out = lrintf(tempfiltered[7][3] * 10.0) * 0.1;
+    wood_burner_smoke = (int16_t)lrintf(tempfiltered[10][3]);
   }
 
   if (adcDone)
@@ -1066,36 +1113,53 @@ void loop()
     adcfiltered[3] = (adctemp[0] + adctemp[3] + 3 * (adctemp[1] + adctemp[2])) / 3.430944333e+04 + (0.8818931306 * adcfiltered[0]) + (-2.7564831952 * adcfiltered[1]) + (2.8743568927 * adcfiltered[2]);
 
     solar_temp = lrintf(adcfiltered[3] * 10.0) * 0.1;     // Round to one decimal
+  }
+
+  if ((time_now - adc_lastCheck) >= adc_checkDelay)
+  {
+    adc_lastCheck = time_now;
     templog[0xCA] = solar_temp;
     templog[0xCB] = solar_temp * 100 - (uint8_t)solar_temp * 100;
   }
-
-  system_status = (laddomat_on << 1) | (solar_pump_on << 0);
-  templog[0xCC] = system_status;
-
-  if (!first_run)
-    if ((time_now - adc_lastCheck) >= adc_checkDelay)
-    {
-      adc_lastCheck = time_now;
-
-      if (checkforchange(0xCA, 0xCC))
-        sample_send |= 256;
-    }
 
   if ((time_now - lastCheck) >= checkDelay)
   {
     lastCheck = time_now;
 
-    ADCSRA |= (1 << ADSC) | (1 << ADATE) | (1 << ADIE);
-
     if ((solar_temp - tank1_lower) <= 4.0)
+    {
       solar_pump_on = false;
+      templog[0xCA] = solar_temp;
+      templog[0xCB] = solar_temp * 100 - (uint8_t)solar_temp * 100;
+      templog[0xCC] &= ~(1 << 0);
+    }
 
     if ((solar_temp - tank1_lower) >= 10.0)
+    {
       solar_pump_on = true;
+      templog[0xCA] = solar_temp;
+      templog[0xCB] = solar_temp * 100 - (uint8_t)solar_temp * 100;
+      templog[0xCC] |= (1 << 0);
+    }
+
+    if (wood_burner_smoke <= 100)
+    {
+      laddomat_on = false;
+      templog[0xCC] &= ~(1 << 1);
+    }
+
+    if (wood_burner_smoke > 100 & wood_burner_out > 70.0)
+    {
+      laddomat_on = true;
+      templog[0xCC] |= (1 << 1);
+    }
 
     if (check_dhw != dhw_ctc)
       set_ctc_temp(check_dhw);
+
+    if (!first_run)
+      if (checkforchange(0xCA, 0xCC))
+        sample_send |= 256;
 
     if (laddomat_on)
       PORTD |= (1 << PORTD6);     // Activate the laddomat relay
@@ -1106,6 +1170,12 @@ void loop()
       PORTB |= (1 << PORTB1);     // Activate the solarpump relay
     else
       PORTB &= ~(1 << PORTB1);    // De-Activate the solarpump relay
+
+    // Reset the watchdog timer
+    wdt_reset();
+
+    // Start the ADC oversampling
+    ADCSRA |= (1 << ADSC) | (1 << ADATE) | (1 << ADIE);
 
     if (sample_send != 0)
     {
