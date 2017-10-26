@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.3.2
+    ver 1.4.0
 **/
 
 #define VER_MAJOR 1
-#define VER_MINOR 3
-#define VER_BUILD 2
+#define VER_MINOR 4
+#define VER_BUILD 0
 
 #include <avr/pgmspace.h>
 #include <avr/wdt.h>
@@ -394,7 +394,28 @@ ISR (SPI_STC_vect)
         // Send test2
         SPDR = test2;                   // Bitflags of TWI error conditions
         while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-        SPDR = 0xD0;                       // Access SPDR to clear SPIF
+
+        // If test2 contains error bit6 then Send test1
+        if (test2 & 64)
+        {
+          convert.nr_32 = test1;          // Number of TWI bus errors due to illegal START or STOP condition
+          SPDR = convert.nr_8[0];
+          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+          SPDR = convert.nr_8[1];
+          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+          SPDR = convert.nr_8[2];
+          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+          SPDR = convert.nr_8[3];
+          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+        }
+
+        // Reset debug vars
+        test2 = 0;
+        test3 = 0;
+        twi_rxBuffer[2] = 0;
+        twi_rxBuffer[3] = 0;
+
+        SPDR = 0xD0;                    // Access SPDR to clear SPIF
       }
       break;
 
