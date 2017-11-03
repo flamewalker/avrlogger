@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.4.0
+    ver 1.4.1
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 4
-#define VER_BUILD 0
+#define VER_BUILD 1
 
 #include <avr/pgmspace.h>
 #include <avr/wdt.h>
@@ -320,7 +320,7 @@ ISR (SPI_STC_vect)
     case 0xF0:                        // Array transfer command
       if (!sync)                      // Not in sync with TWI Master
         SPDR = 0x00;
-      else if (!new_sample)
+      else if (!new_sample && sample_send == 0)
         SPDR = 0x01;
       else
       {
@@ -943,7 +943,7 @@ void setup()
   solar_temp = (solar_resistor - 1000.0) / 3.75;
 
   templog[0xCA] = solar_temp;
-  templog[0xCB] = solar_temp * 100 - (uint8_t)solar_temp * 100;
+  templog[0xCB] = solar_temp * 100 - (int8_t)solar_temp * 100;
   datalog[0xCA] = templog[0xCA];
   datalog[0xCB] = templog[0xCB];
 
@@ -1140,7 +1140,7 @@ void loop()
   {
     adc_lastCheck = time_now;
     templog[0xCA] = solar_temp;
-    templog[0xCB] = solar_temp * 100 - (uint8_t)solar_temp * 100;
+    templog[0xCB] = solar_temp * 100 - (int8_t)solar_temp * 100;
   }
 
   if ((time_now - lastCheck) >= checkDelay)
@@ -1151,7 +1151,7 @@ void loop()
     {
       solar_pump_on = false;
       templog[0xCA] = solar_temp;
-      templog[0xCB] = solar_temp * 100 - (uint8_t)solar_temp * 100;
+      templog[0xCB] = solar_temp * 100 - (int8_t)solar_temp * 100;
       templog[0xCC] &= ~(1 << 0);
     }
 
@@ -1159,7 +1159,7 @@ void loop()
     {
       solar_pump_on = true;
       templog[0xCA] = solar_temp;
-      templog[0xCB] = solar_temp * 100 - (uint8_t)solar_temp * 100;
+      templog[0xCB] = solar_temp * 100 - (int8_t)solar_temp * 100;
       templog[0xCC] |= (1 << 0);
     }
 
