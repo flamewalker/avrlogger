@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.4.1
+    ver 1.4.2
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 4
-#define VER_BUILD 1
+#define VER_BUILD 2
 
 #include <avr/pgmspace.h>
 #include <avr/wdt.h>
@@ -136,7 +136,7 @@ static volatile uint8_t templog[ARRAY_SIZE];
 // Debug vars
 static volatile uint32_t test1 = 0;
 static volatile uint8_t test2 = 0;
-static volatile uint8_t test3 = 0;
+static volatile uint16_t test3 = 0;
 static volatile uint32_t test4 = 0;
 static volatile uint32_t test5 = 0;
 
@@ -166,6 +166,9 @@ static volatile uint8_t twi_txBufferLength = 0;
 
 static volatile uint8_t twi_rxBuffer[TWI_BUFFER_LENGTH];
 static volatile uint8_t twi_rxBufferIndex = 0;
+
+// Watchdog reset check variable
+static volatile uint8_t mcu_reset = 0;
 
 /*
   TWI ISR
@@ -409,6 +412,13 @@ ISR (SPI_STC_vect)
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
         }
 
+        // Send test3
+        convert.nr_16 = test3;
+        SPDR = convert.nr_8[0];
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+        SPDR = convert.nr_8[1];
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
         // Reset debug vars
         test2 = 0;
         test3 = 0;
@@ -461,7 +471,7 @@ ISR (SPI_STC_vect)
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = VER_BUILD;
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = templog[0xCC];
+      SPDR = mcu_reset;
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = 0xD4;                    // Access SPDR to clear SPIF
       break;
@@ -803,10 +813,11 @@ static void measureAVcc()
 void setup()
 {
   // Check the reset cause
-  templog[0xCC] = (MCUSR << 4);
+  mcu_reset = MCUSR;
+  templog[0xCC] = (mcu_reset << 4);
   MCUSR = 0;
 
-  // Initialize WDT
+  // Initialize WDT with 8 seconds timeout
   wdt_enable(WDTO_8S);
 
   // Initialize ports
@@ -873,14 +884,14 @@ void setup()
       tempfiltered[x][2] = temperature;
       tempfiltered[x][3] = temperature;
     }
-/*    else
+    else
     {
-      templog[0xB0 + x * 2] = 0;
-      templog[0xB1 + x * 2] = 0;
-      datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
-      datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
+      test3 |= (1 << x);
+//      templog[0xB0 + x * 2] = 0;
+//      templog[0xB1 + x * 2] = 0;
+//      datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
+//      datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
     }
-*/
   }
   sensors.setWaitForConversion(false);        // Now that we have a starting value in the array we don't have to wait for conversions anymore
   sensors.requestTemperatures();
@@ -1088,12 +1099,12 @@ void loop()
           templog[0xB1 + x * 2] = convert.nr_8[1];                                      // low part of int
         }
       }
-/*      else
+      else
       {
-        templog[0xB0 + x * 2] = 0;
-        templog[0xB1 + x * 2] = 0;
+        test3 |= (1 << x);
+//        templog[0xB0 + x * 2] = 0;
+//        templog[0xB1 + x * 2] = 0;
       }
-*/
     }
     sensors.requestTemperatures();
     lastTempRequest = time_now;
