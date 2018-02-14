@@ -1,16 +1,15 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.4.2
+    ver 1.4.3
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 4
-#define VER_BUILD 2
+#define VER_BUILD 3
 
 #include <avr/pgmspace.h>
 #include <avr/wdt.h>
 #include <OneWire.h>
-#include <DallasTemperature.h>
 #include <EEPROM.h>
 
 // Defs for making a median search routine
@@ -31,26 +30,26 @@
 
 // Data wire is plugged into port 2 on the Arduino
 #define ONE_WIRE_BUS 2
+#define DEVICE_ERROR -127
 
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
 OneWire oneWire(ONE_WIRE_BUS);
 
-// Pass our oneWire reference to Dallas Temperature.
-DallasTemperature sensors(&oneWire);
+typedef uint8_t DeviceAddress[8];
 
 // Array(s) to hold the adress of the connected devices
-DeviceAddress tempsensor[] = {0x28, 0x2E, 0xE8, 0x1D, 0x07, 0x00, 0x00, 0x80,    // Sensor0
-                              0x28, 0x67, 0x3A, 0x1E, 0x07, 0x00, 0x00, 0x36,    // Sensor1
-                              0x28, 0x6F, 0xD4, 0x28, 0x07, 0x00, 0x00, 0xAE,    // Sensor2
-                              0x28, 0xAC, 0x32, 0x1D, 0x07, 0x00, 0x00, 0xE7,    // Sensor3
-                              0x28, 0x0D, 0x73, 0x1D, 0x07, 0x00, 0x00, 0xA8,    // Sensor4
-                              0x28, 0xB7, 0x3B, 0x1D, 0x07, 0x00, 0x00, 0xB7,    // Sensor5
-                              0x28, 0x2E, 0x68, 0x1D, 0x07, 0x00, 0x00, 0x4B,    // Sensor6
-                              0x28, 0x20, 0x40, 0x1D, 0x07, 0x00, 0x00, 0x9E,    // Sensor7
-                              0x28, 0x41, 0x2B, 0x29, 0x07, 0x00, 0x00, 0x4D,    // Sensor8
-                              0x28, 0x99, 0x6D, 0x1C, 0x07, 0x00, 0x00, 0x94,    // Sensor9
-                              0x3B, 0x3F, 0xA8, 0x5D, 0x06, 0xD8, 0x4C, 0x39     // Sensor10  (Thermocouple type K, via MAX31850K
-                             };
+static const DeviceAddress tempsensor[] = {0x28, 0x2E, 0xE8, 0x1D, 0x07, 0x00, 0x00, 0x80,    // Sensor0
+                                           0x28, 0x67, 0x3A, 0x1E, 0x07, 0x00, 0x00, 0x36,    // Sensor1
+                                           0x28, 0x6F, 0xD4, 0x28, 0x07, 0x00, 0x00, 0xAE,    // Sensor2
+                                           0x28, 0xAC, 0x32, 0x1D, 0x07, 0x00, 0x00, 0xE7,    // Sensor3
+                                           0x28, 0x0D, 0x73, 0x1D, 0x07, 0x00, 0x00, 0xA8,    // Sensor4
+                                           0x28, 0xB7, 0x3B, 0x1D, 0x07, 0x00, 0x00, 0xB7,    // Sensor5
+                                           0x28, 0x2E, 0x68, 0x1D, 0x07, 0x00, 0x00, 0x4B,    // Sensor6
+                                           0x28, 0x20, 0x40, 0x1D, 0x07, 0x00, 0x00, 0x9E,    // Sensor7
+                                           0x28, 0x41, 0x2B, 0x29, 0x07, 0x00, 0x00, 0x4D,    // Sensor8
+                                           0x28, 0x99, 0x6D, 0x1C, 0x07, 0x00, 0x00, 0x94,    // Sensor9
+                                           0x3B, 0x3F, 0xA8, 0x5D, 0x06, 0xD8, 0x4C, 0x39     // Sensor10  (Thermocouple type K, via MAX31850K
+                                          };
 
 float sensor_calibration[NUM_SENSORS];
 
@@ -66,7 +65,7 @@ union Convert
 static volatile union Convert convert;
 
 // Look-up table for controlling digipot to simulate 22K NTC between 26-98C
-const uint8_t temp[] PROGMEM = {16,   33,  52,  77,  94,
+const uint8_t PROGMEM temp[] = {16,   33,  52,  77,  94,
                                 109, 124, 145, 165, 178, 196, 213, 224, 239, 249,
                                 5,    17,  26,  35,  43,  55,  62,  71,  77,  84,
                                 91,   97, 107, 113, 119, 125, 130, 136, 141, 147,
@@ -106,9 +105,10 @@ const uint16_t nr_oversamples = 1 << (nr_extra_bits * 2);  // Number of oversamp
 const uint32_t adc_divisor = 1024UL << nr_extra_bits;      // Divisor to be used
 const float lsb_adjust = (1 + nr_extra_bits) * 0.5;        // Adjustment since we cant reach max value
 static volatile uint16_t sample_counter = 0;
-static volatile float voltage_in = 0.0;
+// static volatile float voltage_in = 0.0;
 static volatile float solar_resistor = 0.0;
 static volatile float solar_temp = 0.0;
+static volatile float solar_raw = 0.0;
 static volatile boolean adcDone = false;
 static float tank1_lower = 0.0;
 static float tank1_upper = 0.0;
@@ -499,12 +499,6 @@ ISR (SPI_STC_vect)
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = twi_rxBuffer[3];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-/*
-      SPDR = twi_rxBuffer[4];
-      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = twi_rxBuffer[5];
-      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-*/
       SPDR = 0xD5;                    // Access SPDR to clear SPIF
       break;
 
@@ -810,8 +804,51 @@ static void measureAVcc()
   ADCSRA = saveADCSRA;
 }
 
+float getTemp(const DeviceAddress deviceaddress)
+{
+  oneWire.reset();
+  oneWire.select(deviceaddress);
+  oneWire.write(0xBE);
+  uint8_t scratch[9];
+  for (uint8_t i = 0; i < 9; i++)
+    scratch[i] = oneWire.read();
+  if (oneWire.crc8(scratch, 8) == scratch[8])
+  {
+    int16_t raw = (int16_t)(scratch[1] << 8) | (int16_t)scratch[0];
+    switch (deviceaddress[0])
+    {
+      case 0x28:
+        if (raw >= -880 && raw <= 2000)		// Equal to -55 and +125 temperature
+          return (float)raw * 0.0625;
+        break;
+      case 0x3B:
+        if (!(scratch[0] & 1))
+        {
+          if (raw >= -4000 && raw <= 25600)	// Equal to -250 and +1600 temperature
+            return (float)raw * 0.0625;
+        }
+        else
+        {
+          test3 |= ((scratch[2] & 7) << 11);
+        }
+        break;
+    }
+  }
+  return DEVICE_ERROR;
+}
+
+void requestTemp()
+{
+  oneWire.reset();
+  oneWire.skip();
+  oneWire.write(0x44);
+}
+
 void setup()
 {
+  // Signal that we've started
+  test3 |= (1 << 15);
+
   // Check the reset cause
   mcu_reset = MCUSR;
   templog[0xCC] = (mcu_reset << 4);
@@ -846,33 +883,15 @@ void setup()
     EEPROM.get((x * sizeof(float)), sensor_calibration[x]);
 
   // Initialize OneWire sensors
-  sensors.begin();
-  sensors.setResolution(12);                  // We want all sensors at 12 bit
-  sensors.requestTemperatures();              // We have to guarantee that the array contains a valid temperature before we start the main program
+  requestTemp();
+  delay(750);
   for (uint8_t x = 0; x < NUM_SENSORS; x++)
   {
-    temperature = sensors.getTempC(tempsensor[x]);
-    if (temperature != DEVICE_DISCONNECTED_C && !isnan(temperature))
+    temperature = getTemp(tempsensor[x]);
+    if (temperature != DEVICE_ERROR)
     {
       // Apply sensor calibration
       temperature = temperature + sensor_calibration[x];
-
-      if (x != 10)
-      {
-        mediantemp = lrintf(temperature * 10.0) * 0.1;                        // Round to nearest, one decimal
-        templog[0xB0 + x * 2] = mediantemp;                                   // Split into integer and
-        templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100; // two decimals
-        datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
-        datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
-      }
-      else
-      {
-        convert.nr_16 = (int16_t)lrintf(temperature);
-        templog[0xB0 + x * 2] = convert.nr_8[0];                              // Split into high and
-        templog[0xB1 + x * 2] = convert.nr_8[1];                              // low part of int
-        datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
-        datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
-      }
 
       // Init the filter
       owtemp[x][0] = temperature;
@@ -882,19 +901,35 @@ void setup()
       tempfiltered[x][0] = temperature;
       tempfiltered[x][1] = temperature;
       tempfiltered[x][2] = temperature;
-      tempfiltered[x][3] = temperature;
+
+      tempfiltered[x][3] = (owtemp[x][0] + owtemp[x][3] + 3 * (owtemp[x][1] + owtemp[x][2])) / 3.430944333e+04 + (0.8818931306 * tempfiltered[x][0]) + (-2.7564831952 * tempfiltered[x][1]) + (2.8743568927 * tempfiltered[x][2]);
+
+      if (x != 10)
+      {
+        mediantemp = lrintf(tempfiltered[x][3] * 10.0) * 0.1;                        // Round to nearest, one decimal
+        templog[0xB0 + x * 2] = mediantemp;                                   // Split into integer and
+        templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100; // two decimals
+        datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
+        datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
+      }
+      else
+      {
+        convert.nr_16 = (int16_t)lrintf(tempfiltered[x][3]);
+        templog[0xB0 + x * 2] = convert.nr_8[0];                              // Split into high and
+        templog[0xB1 + x * 2] = convert.nr_8[1];                              // low part of int
+        datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
+        datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
+      }
     }
     else
     {
-      test3 |= (1 << x);
-//      templog[0xB0 + x * 2] = 0;
-//      templog[0xB1 + x * 2] = 0;
-//      datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
-//      datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
+      if (x != 8 && x != 9)		// Hacky for now
+      {
+        test3 |= (1 << x);
+      }
     }
   }
-  sensors.setWaitForConversion(false);        // Now that we have a starting value in the array we don't have to wait for conversions anymore
-  sensors.requestTemperatures();
+  requestTemp();
   time_now = millis();
   lastTempRequest = time_now;
 
@@ -951,24 +986,27 @@ void setup()
   while ((ADCSRA & (1 << ADSC)));
 
   solar_resistor = ReferenceResistor / ((1024.0 / (ADC + 0.5)) - 1.0);
-  solar_temp = (solar_resistor - 1000.0) / 3.75;
+  solar_raw = (solar_resistor - 1000.0) / 3.75;
+
+  // Input for filter
+  adctemp[0] = solar_raw;
+  adctemp[1] = solar_raw;
+  adctemp[2] = solar_raw;
+  adctemp[3] = solar_raw;
+
+  // Butterworth filter with cutoff frequency 0.01*sample frequency (FS=1.33Hz)
+  adcfiltered[0] = solar_raw;
+  adcfiltered[1] = solar_raw;
+  adcfiltered[2] = solar_raw;
+
+  adcfiltered[3] = (adctemp[0] + adctemp[3] + 3 * (adctemp[1] + adctemp[2])) / 3.430944333e+04 + (0.8818931306 * adcfiltered[0]) + (-2.7564831952 * adcfiltered[1]) + (2.8743568927 * adcfiltered[2]);
+
+  solar_temp = lrintf(adcfiltered[3] * 10.0) * 0.1;     // Round to one decimal
 
   templog[0xCA] = solar_temp;
   templog[0xCB] = solar_temp * 100 - (int8_t)solar_temp * 100;
   datalog[0xCA] = templog[0xCA];
   datalog[0xCB] = templog[0xCB];
-
-  // Input for filter
-  adctemp[0] = solar_temp;
-  adctemp[1] = solar_temp;
-  adctemp[2] = solar_temp;
-  adctemp[3] = solar_temp;
-
-  // Butterworth filter with cutoff frequency 0.01*sample frequency (FS=1.33Hz)
-  adcfiltered[0] = solar_temp;
-  adcfiltered[1] = solar_temp;
-  adcfiltered[2] = solar_temp;
-  adcfiltered[3] = solar_temp;
 
   // Get a updated value of AVcc
   measureAVcc();
@@ -1055,8 +1093,8 @@ void loop()
   {
     for (uint8_t x = 0; x < NUM_SENSORS; x++)
     {
-      temperature = sensors.getTempC(tempsensor[x]);
-      if (temperature != DEVICE_DISCONNECTED_C && !isnan(temperature))
+      temperature = getTemp(tempsensor[x]);
+      if (temperature != DEVICE_ERROR)
       {
         // Apply sensor calibration
         temperature = temperature + sensor_calibration[x];
@@ -1065,7 +1103,20 @@ void loop()
         owtemp[x][0] = owtemp[x][1];
         owtemp[x][1] = owtemp[x][2];
         owtemp[x][2] = owtemp[x][3];
-        owtemp[x][3] = temperature;
+        if (x != 10)
+        {
+          if (temperature < (owtemp[x][3]+10.0) && temperature > (owtemp[x][3]-10.0))
+            owtemp[x][3] = temperature;
+          else
+            test3 |= (1 << x) | (1 << 14);
+        }
+        else
+        {
+          if (temperature < (owtemp[x][3]+50.0) && temperature > (owtemp[x][3]-50.0))
+            owtemp[x][3] = temperature;
+          else
+            test3 |= (1 << x) | (1 << 14);
+        }
 
         // Butterworth filter with cutoff frequency 0.01*sample frequency (FS=1.33Hz)
         tempfiltered[x][0] = tempfiltered[x][1];
@@ -1074,18 +1125,6 @@ void loop()
 
         tempfiltered[x][3] = (owtemp[x][0] + owtemp[x][3] + 3 * (owtemp[x][1] + owtemp[x][2])) / 3.430944333e+04 + (0.8818931306 * tempfiltered[x][0]) + (-2.7564831952 * tempfiltered[x][1]) + (2.8743568927 * tempfiltered[x][2]);
 
-/*
-		// Fill the median temporary storage
-        medtmp[x][0] = lrintf(tempfiltered[x][0] * 10.0) * 0.1;
-        medtmp[x][1] = lrintf(tempfiltered[x][1] * 10.0) * 0.1;
-        medtmp[x][2] = lrintf(tempfiltered[x][2] * 10.0) * 0.1;
-        medtmp[x][3] = lrintf(tempfiltered[x][3] * 10.0) * 0.1;
-        medtmp[x][4] = lrintf(tempfiltered[x][4] * 10.0) * 0.1;
-        medtmp[x][5] = lrintf(tempfiltered[x][5] * 10.0) * 0.1;
-
-        mediantemp = lrintf(median6(medtmp[x]) * 10.0) * 0.1;
-//        mediantemp = median6(medtmp[x]);
-*/
         if (x != 10)
         {
           mediantemp = lrintf(tempfiltered[x][3] * 10.0) * 0.1;
@@ -1101,12 +1140,11 @@ void loop()
       }
       else
       {
-        test3 |= (1 << x);
-//        templog[0xB0 + x * 2] = 0;
-//        templog[0xB1 + x * 2] = 0;
+	if (x != 8 && x != 9)		// Hacky for now
+          test3 |= (1 << x);
       }
     }
-    sensors.requestTemperatures();
+    requestTemp();
     lastTempRequest = time_now;
     test5++;
     ok_sample_ow = false;
@@ -1127,24 +1165,35 @@ void loop()
   if (adcDone)
   {
     adcDone = false;
-    voltage_in = AnalogReferenceVoltage * (adjusted_ADC + lsb_adjust) / adc_divisor;
+    // voltage_in = AnalogReferenceVoltage * (adjusted_ADC + lsb_adjust) / adc_divisor;
     solar_resistor = ReferenceResistor / ((adc_divisor / (adjusted_ADC + lsb_adjust)) - 1.0);
-    solar_temp = (solar_resistor - 1000.0) / 3.75;
+    solar_raw = (solar_resistor - 1000.0) / 3.75;
 
-    // Input for filter
-    adctemp[0] = adctemp[1];
-    adctemp[1] = adctemp[2];
-    adctemp[2] = adctemp[3];
-    adctemp[3] = solar_temp;
+    if (solar_raw >= -55.0 && solar_raw <= 150.0)
+    {
+      // Input for filter
+      adctemp[0] = adctemp[1];
+      adctemp[1] = adctemp[2];
+      adctemp[2] = adctemp[3];
+      if (solar_raw < (adctemp[3]+10.0) && solar_raw > (adctemp[3]-10.0))
+        adctemp[3] = solar_raw;
+      else
+        test3 |= (1 << 11);
 
-    // Butterworth filter with cutoff frequency 0.01*sample frequency (FS=1.33Hz)
-    adcfiltered[0] = adcfiltered[1];
-    adcfiltered[1] = adcfiltered[2];
-    adcfiltered[2] = adcfiltered[3];
+      // Butterworth filter with cutoff frequency 0.01*sample frequency (FS=1.33Hz)
+      adcfiltered[0] = adcfiltered[1];
+      adcfiltered[1] = adcfiltered[2];
+      adcfiltered[2] = adcfiltered[3];
 
-    adcfiltered[3] = (adctemp[0] + adctemp[3] + 3 * (adctemp[1] + adctemp[2])) / 3.430944333e+04 + (0.8818931306 * adcfiltered[0]) + (-2.7564831952 * adcfiltered[1]) + (2.8743568927 * adcfiltered[2]);
+      adcfiltered[3] = (adctemp[0] + adctemp[3] + 3 * (adctemp[1] + adctemp[2])) / 3.430944333e+04 + (0.8818931306 * adcfiltered[0]) + (-2.7564831952 * adcfiltered[1]) + (2.8743568927 * adcfiltered[2]);
 
-    solar_temp = lrintf(adcfiltered[3] * 10.0) * 0.1;     // Round to one decimal
+      solar_temp = lrintf(adcfiltered[3] * 10.0) * 0.1;     // Round to one decimal
+    }
+	else
+    {
+	  if (solar_raw > 150.0)	// Could indicate an open circuit
+            test3 |= (1 << 13);
+    }
   }
 
   if ((time_now - adc_lastCheck) >= adc_checkDelay)
@@ -1158,7 +1207,7 @@ void loop()
   {
     lastCheck = time_now;
 
-    if ((solar_temp - tank1_lower) <= 4.0)
+    if (solar_pump_on && (solar_temp <= (4.0 + tank1_lower)))
     {
       solar_pump_on = false;
       templog[0xCA] = solar_temp;
@@ -1166,7 +1215,7 @@ void loop()
       templog[0xCC] &= ~(1 << 0);
     }
 
-    if ((solar_temp - tank1_lower) >= 10.0)
+    if (!solar_pump_on && (solar_temp >= (10.0 + tank1_lower)))
     {
       solar_pump_on = true;
       templog[0xCA] = solar_temp;
@@ -1174,13 +1223,13 @@ void loop()
       templog[0xCC] |= (1 << 0);
     }
 
-    if (wood_burner_smoke <= 100)
+    if (laddomat_on && (wood_burner_smoke <= 100))
     {
       laddomat_on = false;
       templog[0xCC] &= ~(1 << 1);
     }
 
-    if (wood_burner_smoke > 100 & wood_burner_out > 70.0)
+	if (!laddomat_on && ((wood_burner_smoke > 100) && (wood_burner_out > 70.0)))
     {
       laddomat_on = true;
       templog[0xCC] |= (1 << 1);
