@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.5.0
+    ver 1.5.1
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 5
-#define VER_BUILD 0
+#define VER_BUILD 1
 
 #include <avr/pgmspace.h>
 #include <avr/wdt.h>
@@ -400,7 +400,6 @@ ISR (SPI_STC_vect)
         // Send twi_error_code
         SPDR = twi_error_code;                   // Bitflags of TWI error conditions
         while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-
         // If twi_error_code contains error bit6 then Send twi_bus_error_counter
         if (twi_error_code & 64)
         {
@@ -414,6 +413,7 @@ ISR (SPI_STC_vect)
           SPDR = convert.nr_8[3];
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
         }
+        twi_error_code = 0;
 
         // Send sensor_error_code
         convert.nr_16 = sensor_error_code;
@@ -421,17 +421,12 @@ ISR (SPI_STC_vect)
         while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
         SPDR = convert.nr_8[1];
         while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+        sensor_error_code = 0;
 
         // Send adc_error_code
         SPDR = adc_error_code;
         while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-
-        // Reset debug vars
-        twi_error_code = 0;
-        sensor_error_code = 0;
         adc_error_code = 0;
-        twi_rxBuffer[2] = 0;
-        twi_rxBuffer[3] = 0;
 
         SPDR = 0xD0;                    // Access SPDR to clear SPIF
       }
@@ -496,14 +491,34 @@ ISR (SPI_STC_vect)
     case 0xF5:                        // Fetch ALL debug variables
       SPDR = 0xD5;
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = twi_bus_error_counter;
+
+      // Send TWI_bus_error_counter
+      convert.nr_32 = twi_bus_error_counter;	// Number of TWI bus errors due to illegal START or STOP condition
+      SPDR = convert.nr_8[0];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[2];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[3];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
+      // Send TWI_error_code
       SPDR = twi_error_code;
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-      SPDR = sensor_error_code;
+
+      // Send sensor_error_code
+      convert.nr_16 = sensor_error_code;
+      SPDR = convert.nr_8[0];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
+      // Send count
       SPDR = count;
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
+      // Send TWI buffers
       SPDR = twi_rxBuffer[0];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = twi_rxBuffer[1];
@@ -516,12 +531,23 @@ ISR (SPI_STC_vect)
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = twi_rxBuffer[3];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      twi_rxBuffer[2] = 0;
+      twi_rxBuffer[3] = 0;
+
+      // Send some boolean variables
+      SPDR = start_sampling;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = twi_sample_done;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = ok_sample_ow;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = 0xD5;                    // Access SPDR to clear SPIF
       break;
 
     case 0xF6:                        // Release bus and reset TWI hardware
       SPDR = 0xD6;
       TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT) | (1 << TWEA) | (1 << TWSTO);
+      start_sampling = true;
       if (!sync)                      // Not in sync with TWI Master
         SPDR = 0x00;
       else if (!new_sample)
@@ -682,15 +708,6 @@ ISR (SPI_STC_vect)
       convert.nr_8[3] = SPDR;
       solar_off_temp = convert.number;
       EEPROM.put((256 + sizeof(float)), solar_off_temp);
-      break;
-
-    case 0xAF:
-      twi_error_code = 0;
-      sensor_error_code = 0;
-      adc_error_code = 0;
-      twi_rxBuffer[2] = 0;
-      twi_rxBuffer[3] = 0;
-      SPDR = 0xBF;
       break;
 
     default:
