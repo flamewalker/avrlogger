@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.5.1
+    ver 1.5.2
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 5
-#define VER_BUILD 1
+#define VER_BUILD 2
 
 #include <avr/pgmspace.h>
 #include <avr/wdt.h>
@@ -124,6 +124,8 @@ static uint16_t adc_checkDelay = 2000;
 
 // Variables to control relays
 static volatile boolean solar_pump_on = false;
+static volatile boolean solar_pump_override_on = false;
+static volatile boolean solar_pump_override_off = false;
 static volatile boolean laddomat_on = false;
 
 // Buffer and variables for SPI -> TWI command transfer
@@ -605,16 +607,20 @@ ISR (SPI_STC_vect)
       SPDR = 0xD9;                    // Access SPDR to clear SPIF
       break;
 
-    case 0xFA:
-      solar_pump_on = true;
-      SPDR = solar_pump_on;
+    case 0xFA:                        // Toggle the state of solar_pump_override_on
+      solar_pump_override_on = !solar_pump_override_on;
+      if (solar_pump_override_off && solar_pump_override_on)  // Not both true at the same time
+        solar_pump_override_on = false;
+      SPDR = solar_pump_override_on;
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = 0xDA;                    // Access SPDR to clear SPIF
       break;
 
-    case 0xFB:
-      solar_pump_on = false;
-      SPDR = solar_pump_on;
+    case 0xFB:                        // Toggle the state of solar_pump_override_off
+      solar_pump_override_off = !solar_pump_override_off;
+      if (solar_pump_override_on && solar_pump_override_off)  // Not both true at the same time
+        solar_pump_override_off = false;
+      SPDR = solar_pump_override_off;
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = 0xDB;                    // Access SPDR to clear SPIF
       break;
@@ -1297,7 +1303,7 @@ void loop()
   {
     lastCheck = time_now;
 
-    if (solar_pump_on && (solar_temp <= (solar_off_temp + tank1_lower)))
+    if ((solar_pump_on && (solar_temp <= (solar_off_temp + tank1_lower)) && !solar_pump_override_on) || solar_pump_override_off)
     {
       solar_pump_on = false;
       templog[0xCA] = solar_temp;
@@ -1305,7 +1311,7 @@ void loop()
       templog[0xCC] &= ~(1 << 0);
     }
 
-    if (!solar_pump_on && (solar_temp >= (solar_on_temp + tank1_lower)))
+    if ((!solar_pump_on && (solar_temp >= (solar_on_temp + tank1_lower)) && !solar_pump_override_off) || solar_pump_override_on)
     {
       solar_pump_on = true;
       templog[0xCA] = solar_temp;
