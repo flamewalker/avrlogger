@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.5.2
+    ver 1.5.3
 **/
 
 #define VER_MAJOR 1
 #define VER_MINOR 5
-#define VER_BUILD 2
+#define VER_BUILD 3
 
 #include <avr/pgmspace.h>
 #include <avr/wdt.h>
@@ -38,18 +38,18 @@ OneWire oneWire(ONE_WIRE_BUS);
 typedef uint8_t DeviceAddress[8];
 
 // Array(s) to hold the adress of the connected devices
-static const DeviceAddress tempsensor[] = {0x28, 0x2E, 0xE8, 0x1D, 0x07, 0x00, 0x00, 0x80,    // Sensor0
-                                           0x28, 0x67, 0x3A, 0x1E, 0x07, 0x00, 0x00, 0x36,    // Sensor1
-                                           0x28, 0x6F, 0xD4, 0x28, 0x07, 0x00, 0x00, 0xAE,    // Sensor2
-                                           0x28, 0xAC, 0x32, 0x1D, 0x07, 0x00, 0x00, 0xE7,    // Sensor3
-                                           0x28, 0x0D, 0x73, 0x1D, 0x07, 0x00, 0x00, 0xA8,    // Sensor4
-                                           0x28, 0xB7, 0x3B, 0x1D, 0x07, 0x00, 0x00, 0xB7,    // Sensor5
-                                           0x28, 0x2E, 0x68, 0x1D, 0x07, 0x00, 0x00, 0x4B,    // Sensor6
-                                           0x28, 0x20, 0x40, 0x1D, 0x07, 0x00, 0x00, 0x9E,    // Sensor7
-                                           0x28, 0x41, 0x2B, 0x29, 0x07, 0x00, 0x00, 0x4D,    // Sensor8
-                                           0x28, 0x99, 0x6D, 0x1C, 0x07, 0x00, 0x00, 0x94,    // Sensor9
-                                           0x3B, 0x3F, 0xA8, 0x5D, 0x06, 0xD8, 0x4C, 0x39     // Sensor10  (Thermocouple type K, via MAX31850K
-                                          };
+const DeviceAddress tempsensor[] PROGMEM = {0x28, 0x2E, 0xE8, 0x1D, 0x07, 0x00, 0x00, 0x80,    // Sensor0
+                                            0x28, 0x67, 0x3A, 0x1E, 0x07, 0x00, 0x00, 0x36,    // Sensor1
+                                            0x28, 0x6F, 0xD4, 0x28, 0x07, 0x00, 0x00, 0xAE,    // Sensor2
+                                            0x28, 0xAC, 0x32, 0x1D, 0x07, 0x00, 0x00, 0xE7,    // Sensor3
+                                            0x28, 0x0D, 0x73, 0x1D, 0x07, 0x00, 0x00, 0xA8,    // Sensor4
+                                            0x28, 0xB7, 0x3B, 0x1D, 0x07, 0x00, 0x00, 0xB7,    // Sensor5
+                                            0x28, 0x2E, 0x68, 0x1D, 0x07, 0x00, 0x00, 0x4B,    // Sensor6
+                                            0x28, 0x20, 0x40, 0x1D, 0x07, 0x00, 0x00, 0x9E,    // Sensor7
+                                            0x28, 0x41, 0x2B, 0x29, 0x07, 0x00, 0x00, 0x4D,    // Sensor8
+                                            0x28, 0x99, 0x6D, 0x1C, 0x07, 0x00, 0x00, 0x94,    // Sensor9
+                                            0x3B, 0x3F, 0xA8, 0x5D, 0x06, 0xD8, 0x4C, 0x39     // Sensor10  (Thermocouple type K, via MAX31850K
+                                           };
 
 float sensor_calibration[NUM_SENSORS];
 
@@ -83,15 +83,13 @@ static volatile uint8_t dhw_ctc = 75;
 static uint8_t check_dhw = 75;
 
 // Variables for handling sampling from OneWire sensors
-static float temperature, mediantemp = 0.0;
 //static float medtmp[NUM_SENSORS][NUM_MEDIAN];
 static float owtemp[NUM_SENSORS][4];
 static float tempfiltered[NUM_SENSORS][4];
 static uint32_t lastTempRequest = 0;
-static uint32_t time_now = 0;
 static uint32_t lastCheck = 0;
-static uint16_t delayInMillis = 750;
-static uint16_t checkDelay = 1000;
+const uint16_t delayInMillis = 750;
+const uint16_t checkDelay = 1000;
 
 // Variables for handling reading of the ADC
 const float InternalReferenceVoltage = 1.100;  // Actually not measured... yet
@@ -106,9 +104,7 @@ const uint32_t adc_divisor = 1024UL << nr_extra_bits;      // Divisor to be used
 const float lsb_adjust = (1 + nr_extra_bits) * 0.5;        // Adjustment since we cant reach max value
 static volatile uint16_t sample_counter = 0;
 // static volatile float voltage_in = 0.0;
-static volatile float solar_resistor = 0.0;
 static volatile float solar_temp = 0.0;
-static volatile float solar_raw = 0.0;
 static float solar_on_temp = 10.0;
 static float solar_off_temp = 4.0;
 static volatile boolean adcDone = false;
@@ -120,7 +116,7 @@ static int16_t wood_burner_smoke = 0;
 static float adctemp[4];
 static float adcfiltered[4];
 static uint32_t adc_lastCheck = 0;
-static uint16_t adc_checkDelay = 2000;
+const uint16_t adc_checkDelay = 2000;
 
 // Variables to control relays
 static volatile boolean solar_pump_on = false;
@@ -716,6 +712,43 @@ ISR (SPI_STC_vect)
       EEPROM.put((256 + sizeof(float)), solar_off_temp);
       break;
 
+    case 0xA5:                        // Fetch ALL debug variables
+      SPDR = 0xB5;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
+      // Send adjusted_ADC
+      convert.nr_32 = adjusted_ADC;// The oversampled value of ADC
+      SPDR = convert.nr_8[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[2];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[3];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
+      // Send system_status
+      SPDR = templog[0xCC];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
+      // Send solar_temp
+      convert.number = solar_temp;     // The actual solar_temp
+      SPDR = convert.nr_8[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[2];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[3];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
+      // Send solar_pump_on
+      SPDR = solar_pump_on;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
+      SPDR = 0xD5;                    // Access SPDR to clear SPIF
+      break;
+
     default:
       SPDR = 0xAA;
       break;
@@ -977,7 +1010,9 @@ void setup()
   delay(750);
   for (uint8_t x = 0; x < NUM_SENSORS; x++)
   {
-    temperature = getTemp(tempsensor[x]);
+    DeviceAddress devicetemp;
+    memcpy_P (&devicetemp, tempsensor[x], sizeof (DeviceAddress));
+    float temperature = getTemp(devicetemp);
     if (temperature != DEVICE_ERROR)
     {
       // Apply sensor calibration
@@ -996,7 +1031,7 @@ void setup()
 
       if (x != 10)
       {
-        mediantemp = lrintf(tempfiltered[x][3] * 10.0) * 0.1;                 // Round to nearest, one decimal
+        float mediantemp = lrintf(tempfiltered[x][3] * 10.0) * 0.1;                 // Round to nearest, one decimal
         templog[0xB0 + x * 2] = mediantemp;                                   // Split into integer and
         templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100; // two decimals
         datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
@@ -1020,8 +1055,6 @@ void setup()
     }
   }
   requestTemp();
-  time_now = millis();
-  lastTempRequest = time_now;
 
   tank1_lower = lrintf(tempfiltered[0][3] * 10.0) * 0.1;
   tank1_upper = lrintf(tempfiltered[1][3] * 10.0) * 0.1;
@@ -1075,9 +1108,8 @@ void setup()
 
   // Wait for the ADC to finish the first conversion
   while ((ADCSRA & (1 << ADSC)));
-
-  solar_resistor = ReferenceResistor / ((1024.0 / (ADC + 0.5)) - 1.0);
-  solar_raw = (solar_resistor - 1000.0) / 3.75;
+  float solar_resistor = ReferenceResistor / ((1024.0 / (ADC + 0.5)) - 1.0);	// Only one sample used
+  float solar_raw = (solar_resistor - 1000.0) / 3.75;
 
   // Input for filter
   adctemp[0] = solar_raw;
@@ -1103,16 +1135,15 @@ void setup()
   measureAVcc();
 
   // Initialize the timekeeping vars
-  time_now = millis();
-  lastTempRequest = time_now;
-  adc_lastCheck = time_now;
-  lastCheck = time_now;
-  twi_lastCheck = time_now;
+  lastTempRequest = millis();
+  adc_lastCheck = lastTempRequest;
+  lastCheck = lastTempRequest;
+  twi_lastCheck = lastTempRequest;
 } // end of setup
 
 void loop()
 {
-  time_now = millis();
+  uint32_t time_now = millis();
 
   // Start checking the status of the newly taken sample versus the last sent
   if (twi_sample_done)
@@ -1187,7 +1218,9 @@ void loop()
   {
     for (uint8_t x = 0; x < NUM_SENSORS; x++)
     {
-      temperature = getTemp(tempsensor[x]);
+      DeviceAddress devicetemp;
+      memcpy_P (&devicetemp, tempsensor[x], sizeof (DeviceAddress));
+      float temperature = getTemp(devicetemp);
       if (temperature != DEVICE_ERROR)
       {
         // Apply sensor calibration
@@ -1206,7 +1239,7 @@ void loop()
         }
         else
         {
-          if (temperature < (owtemp[x][3]+50.0) && temperature > (owtemp[x][3]-50.0))
+          if (temperature < (owtemp[x][3]+75.0) && temperature > (owtemp[x][3]-75.0))
             owtemp[x][3] = temperature;
           else
             sensor_error_code |= (1 << x) | (1 << 14);
@@ -1221,7 +1254,7 @@ void loop()
 
         if (x != 10)
         {
-          mediantemp = lrintf(tempfiltered[x][3] * 10.0) * 0.1;
+          float mediantemp = lrintf(tempfiltered[x][3] * 10.0) * 0.1;
           templog[0xB0 + x * 2] = mediantemp;
           templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100;
         }
@@ -1260,10 +1293,10 @@ void loop()
   {
     adcDone = false;
     // voltage_in = AnalogReferenceVoltage * (adjusted_ADC + lsb_adjust) / adc_divisor;
-    solar_resistor = ReferenceResistor / ((adc_divisor / (adjusted_ADC + lsb_adjust)) - 1.0);
-    solar_raw = (solar_resistor - 1000.0) / 3.75;
+    float solar_resistor = ReferenceResistor / ((adc_divisor / (adjusted_ADC + lsb_adjust)) - 1.0);
+    float solar_raw = (solar_resistor - 1000.0) / 3.75;
 
-    if (solar_raw >= -55.0 && solar_raw <= 150.0)
+    if (solar_raw >= -55.0 && solar_raw <= 200.0)
     {
       // Input for filter
       adctemp[0] = adctemp[1];
@@ -1285,7 +1318,7 @@ void loop()
     }
     else
     {
-      if (solar_raw > 150.0)	// Could indicate an open circuit
+      if (solar_raw > 200.0)	// Could indicate an open circuit
         adc_error_code |= (1 << 0) | (1 << 2);
       if (solar_raw < -55.0)    // Could indicate a short circuit
         adc_error_code |= (1 << 0) | (1 << 3);
