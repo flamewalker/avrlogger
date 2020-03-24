@@ -48,7 +48,7 @@ const DeviceAddress tempsensor[] PROGMEM = {0x28, 0x2E, 0xE8, 0x1D, 0x07, 0x00, 
                                             0x28, 0x20, 0x40, 0x1D, 0x07, 0x00, 0x00, 0x9E,    // Sensor7
                                             0x28, 0x41, 0x2B, 0x29, 0x07, 0x00, 0x00, 0x4D,    // Sensor8
                                             0x28, 0x99, 0x6D, 0x1C, 0x07, 0x00, 0x00, 0x94,    // Sensor9
-                                            0x3B, 0x3F, 0xA8, 0x5D, 0x06, 0xD8, 0x4C, 0x39     // Sensor10  (Thermocouple type K, via MAX31850K
+                                            0x3B, 0xFE, 0x20, 0x18, 0x00, 0x00, 0x00, 0x1F     // Sensor10  (Thermocouple type K, via MAX31850K
                                            };
 
 float sensor_calibration[NUM_SENSORS];
@@ -1364,7 +1364,7 @@ void loop()
       templog[0xCC] |= (1 << 1);
     }
 
-    if (check_dhw != dhw_ctc)
+    if (check_dhw != dhw_ctc && check_dhw > 24 && check_dhw < 100)
       set_ctc_temp(check_dhw);
 
     if (!first_run)
