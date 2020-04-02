@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 2.0.0
+    ver 2.0.1
 **/
 
 #define VER_MAJOR 2
 #define VER_MINOR 0
-#define VER_BUILD 0
+#define VER_BUILD 1
 
 #include <avr/pgmspace.h>
 #include <avr/wdt.h>
@@ -123,6 +123,12 @@ static volatile boolean solar_pump_on = false;
 static volatile boolean solar_pump_force_on = false;
 static volatile boolean solar_pump_force_off = false;
 static volatile boolean laddomat_on = false;
+
+// Variables for handling self-circulation in solar panels
+static volatile boolean anti_circulation = false;
+static volatile boolean anti_circ_first_run = true;
+static uint32_t anti_circ_timer = 0;
+const uint16_t anti_circ_delay = 10000;
 
 // Buffer and variables for SPI -> TWI command transfer
 static volatile uint8_t spi_cmd[2] = { 0xDE, 0x64 };
@@ -633,6 +639,13 @@ ISR (SPI_STC_vect)
       SPDR = laddomat_on;
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       SPDR = 0xDD;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xFE:
+      anti_circulation = true;
+      SPDR = anti_circulation;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xDE;                    // Access SPDR to clear SPIF
       break;
 
     case 0xA0:
@@ -1149,6 +1162,26 @@ void setup()
 void loop()
 {
   uint32_t time_now = millis();
+
+  // Handle self-ciculation in solar panels
+  if (anti_circulation && !solar_pump_force_off)
+  {
+    if (anti_circ_first_run)
+    {
+      anti_circ_timer = time_now;
+      anti_circ_first_run = false;
+      solar_pump_force_on = true;
+    }
+    else
+    {
+      if ((time_now - anti_circ_timer) >= anti_circ_delay)
+      {
+        anti_circulation = false;
+        anti_circ_first_run = true;
+        solar_pump_force_on = false;
+      }
+    }
+  }
 
   // Start checking the status of the newly taken sample versus the last sent
   if (twi_sample_done)
