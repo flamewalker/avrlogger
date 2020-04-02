@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.5.3
+    ver 2.0.0
 **/
 
-#define VER_MAJOR 1
-#define VER_MINOR 5
-#define VER_BUILD 3
+#define VER_MAJOR 2
+#define VER_MINOR 0
+#define VER_BUILD 0
 
 #include <avr/pgmspace.h>
 #include <avr/wdt.h>
@@ -22,7 +22,7 @@
 #define NUM_SENSORS 11
 
 // Basic array sizes, just need to add the number of connected OneWire sensors
-#define ARRAY_SIZE 0xCD
+#define ARRAY_SIZE 0xCF
 #define SAMPLE_SIZE 0xAD
 
 // TWI buffer length
@@ -353,8 +353,8 @@ ISR (SPI_STC_vect)
         sample_send = 0;                   // Reset now that we have sent everything
 
         // Reset the upper bits of system status flags
-        templog[0xCC] &= ~240;
-        datalog[0xCC] = templog[0xCC];
+        templog[0xCE] &= ~240;
+        datalog[0xCE] = templog[0xCE];
 
         // Send ow_sample_counter
         convert.nr_32 = ow_sample_counter;
@@ -728,7 +728,7 @@ ISR (SPI_STC_vect)
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
 
       // Send system_status
-      SPDR = templog[0xCC];
+      SPDR = templog[0xCE];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
 
       // Send solar_temp
@@ -953,7 +953,7 @@ void setup()
 
   // Check the reset cause
   mcu_reset = MCUSR;
-  templog[0xCC] = (mcu_reset << 4);
+  templog[0xCE] = (mcu_reset << 4);
   MCUSR = 0;
 
   // Initialize WDT with 8 seconds timeout
@@ -1126,10 +1126,15 @@ void setup()
 
   solar_temp = lrintf(adcfiltered[3] * 10.0) * 0.1;     // Round to one decimal
 
-  templog[0xCA] = solar_temp;
-  templog[0xCB] = solar_temp * 100 - (int8_t)solar_temp * 100;
+  convert.number = solar_temp;
+  templog[0xCA] = convert.nr_8[0];
+  templog[0xCB] = convert.nr_8[1];
+  templog[0xCC] = convert.nr_8[2];
+  templog[0xCD] = convert.nr_8[3];
   datalog[0xCA] = templog[0xCA];
   datalog[0xCB] = templog[0xCB];
+  datalog[0xCC] = templog[0xCC];
+  datalog[0xCD] = templog[0xCD];
 
   // Get a updated value of AVcc
   measureAVcc();
@@ -1328,8 +1333,11 @@ void loop()
   if ((time_now - adc_lastCheck) >= adc_checkDelay)
   {
     adc_lastCheck = time_now;
-    templog[0xCA] = solar_temp;
-    templog[0xCB] = solar_temp * 100 - (int8_t)solar_temp * 100;
+    convert.number = solar_temp;
+    templog[0xCA] = convert.nr_8[0];
+    templog[0xCB] = convert.nr_8[1];
+    templog[0xCC] = convert.nr_8[2];
+    templog[0xCD] = convert.nr_8[3];
   }
 
   if ((time_now - lastCheck) >= checkDelay)
@@ -1339,36 +1347,42 @@ void loop()
     if ((solar_pump_on && (solar_temp <= (solar_off_temp + tank1_lower)) && !solar_pump_force_on) || solar_pump_force_off)
     {
       solar_pump_on = false;
-      templog[0xCA] = solar_temp;
-      templog[0xCB] = solar_temp * 100 - (int8_t)solar_temp * 100;
-      templog[0xCC] &= ~(1 << 0);
+      convert.number = solar_temp;
+      templog[0xCA] = convert.nr_8[0];
+      templog[0xCB] = convert.nr_8[1];
+      templog[0xCC] = convert.nr_8[2];
+      templog[0xCD] = convert.nr_8[3];
+      templog[0xCE] &= ~(1 << 0);
     }
 
     if ((!solar_pump_on && (solar_temp >= (solar_on_temp + tank1_lower)) && !solar_pump_force_off) || solar_pump_force_on)
     {
       solar_pump_on = true;
-      templog[0xCA] = solar_temp;
-      templog[0xCB] = solar_temp * 100 - (int8_t)solar_temp * 100;
-      templog[0xCC] |= (1 << 0);
+      convert.number = solar_temp;
+      templog[0xCA] = convert.nr_8[0];
+      templog[0xCB] = convert.nr_8[1];
+      templog[0xCC] = convert.nr_8[2];
+      templog[0xCD] = convert.nr_8[3];
+      templog[0xCE] |= (1 << 0);
     }
 
     if (laddomat_on && (wood_burner_smoke <= 100))
     {
       laddomat_on = false;
-      templog[0xCC] &= ~(1 << 1);
+      templog[0xCE] &= ~(1 << 1);
     }
 
 	if (!laddomat_on && ((wood_burner_smoke > 100) && (wood_burner_out > 70.0)))
     {
       laddomat_on = true;
-      templog[0xCC] |= (1 << 1);
+      templog[0xCE] |= (1 << 1);
     }
 
     if (check_dhw != dhw_ctc && check_dhw > 24 && check_dhw < 100)
       set_ctc_temp(check_dhw);
 
     if (!first_run)
-      if (checkforchange(0xCA, 0xCC))
+      if (checkforchange(0xCA, 0xCE))
         sample_send |= 256;
 
     if (laddomat_on)
