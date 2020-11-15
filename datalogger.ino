@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 2.0.1
+    ver 2.0.2
 **/
 
 #define VER_MAJOR 2
 #define VER_MINOR 0
-#define VER_BUILD 1
+#define VER_BUILD 2
 
 #include <avr/pgmspace.h>
 #include <avr/wdt.h>
@@ -22,7 +22,7 @@
 #define NUM_SENSORS 11
 
 // Basic array sizes, just need to add the number of connected OneWire sensors
-#define ARRAY_SIZE 0xCF
+#define ARRAY_SIZE 0xD0
 #define SAMPLE_SIZE 0xAD
 
 // TWI buffer length
@@ -37,19 +37,32 @@ OneWire oneWire(ONE_WIRE_BUS);
 
 typedef uint8_t DeviceAddress[8];
 
-// Array(s) to hold the adress of the connected devices
-const DeviceAddress tempsensor[] PROGMEM = {0x28, 0x2E, 0xE8, 0x1D, 0x07, 0x00, 0x00, 0x80,    // Sensor0
-                                            0x28, 0x67, 0x3A, 0x1E, 0x07, 0x00, 0x00, 0x36,    // Sensor1
-                                            0x28, 0x6F, 0xD4, 0x28, 0x07, 0x00, 0x00, 0xAE,    // Sensor2
-                                            0x28, 0xAC, 0x32, 0x1D, 0x07, 0x00, 0x00, 0xE7,    // Sensor3
-                                            0x28, 0x0D, 0x73, 0x1D, 0x07, 0x00, 0x00, 0xA8,    // Sensor4
-                                            0x28, 0xB7, 0x3B, 0x1D, 0x07, 0x00, 0x00, 0xB7,    // Sensor5
-                                            0x28, 0x2E, 0x68, 0x1D, 0x07, 0x00, 0x00, 0x4B,    // Sensor6
-                                            0x28, 0x20, 0x40, 0x1D, 0x07, 0x00, 0x00, 0x9E,    // Sensor7
-                                            0x28, 0x41, 0x2B, 0x29, 0x07, 0x00, 0x00, 0x4D,    // Sensor8
-                                            0x28, 0x99, 0x6D, 0x1C, 0x07, 0x00, 0x00, 0x94,    // Sensor9
-                                            0x3B, 0xFE, 0x20, 0x18, 0x00, 0x00, 0x00, 0x1F     // Sensor10  (Thermocouple type K, via MAX31850K
+// Array to hold the adress of the connected devices
+const DeviceAddress tempsensor[] PROGMEM = {0x28, 0x2E, 0xE8, 0x1D, 0x07, 0x00, 0x00, 0x80,    // Sensor0  =  Tank 1 Nedre
+                                            0x28, 0x67, 0x3A, 0x1E, 0x07, 0x00, 0x00, 0x36,    // Sensor1  =  Tank 1 Övre
+                                            0x28, 0x6F, 0xD4, 0x28, 0x07, 0x00, 0x00, 0xAE,    // Sensor2  =  Tank 1 Element
+                                            0x28, 0xAC, 0x32, 0x1D, 0x07, 0x00, 0x00, 0xE7,    // Sensor3  =  Tank 1 Varmvatten
+                                            0x28, 0x0D, 0x73, 0x1D, 0x07, 0x00, 0x00, 0xA8,    // Sensor4  =  Tank 2 Nedre
+                                            0x28, 0x41, 0x2B, 0x29, 0x07, 0x00, 0x00, 0x4D,    // Sensor5  =  Tank 2 Övre
+                                            0x28, 0x2E, 0x68, 0x1D, 0x07, 0x00, 0x00, 0x4B,    // Sensor6  =  Panna IN
+                                            0x28, 0x20, 0x40, 0x1D, 0x07, 0x00, 0x00, 0x9E,    // Sensor7  =  Panna UT
+                                            0x28, 0xB7, 0x3B, 0x1D, 0x07, 0x00, 0x00, 0xB7,    // Sensor8  =  Tidigare Sensor5 (Trasig)
+                                            0x28, 0x99, 0x6D, 0x1C, 0x07, 0x00, 0x00, 0x94,    // Sensor9  =  Ej inkopplad
+                                            0x3B, 0xFE, 0x20, 0x18, 0x00, 0x00, 0x00, 0x1F     // Sensor10 =  Rökgastemperatur  (Thermocouple type K, via MAX31850K)
                                            };
+// Array to hold error status and error counter, 255 = Disconnected sensor
+uint8_t sensor_status[] = {0,       // Sensor0
+                           0,       // Sensor1
+                           0,       // Sensor2
+                           0,       // Sensor3
+                           0,       // Sensor4
+                           0,       // Sensor5
+                           0,       // Sensor6
+                           0,       // Sensor7
+                           255,     // Sensor8
+                           255,     // Sensor9
+                           0        // Sensor10
+                          };
 
 float sensor_calibration[NUM_SENSORS];
 
@@ -75,8 +88,6 @@ const uint8_t PROGMEM temp[] = {16,   33,  52,  77,  94,
                                 245, 247, 248, 250, 251, 251, 252, 254
                                };
 
-// Command buffer for DigiPot
-static volatile uint8_t digi_cmd[2] = {0, 0};
 
 // Variable to hold actual temp of hot water
 static volatile uint8_t dhw_ctc = 75;
@@ -92,9 +103,9 @@ const uint16_t delayInMillis = 750;
 const uint16_t checkDelay = 1000;
 
 // Variables for handling reading of the ADC
-const float InternalReferenceVoltage = 1.100;  // Actually not measured... yet
+//const float InternalReferenceVoltage = 1.100;  // Actually not measured... yet
 const float ReferenceResistor = 1270.0;        // Actually not measured... yet
-static volatile float AnalogReferenceVoltage = 3.300;   // Ideally it should be this... but we measure it later
+//static volatile float AnalogReferenceVoltage = 3.300;   // Ideally it should be this... but we measure it later
 static volatile uint16_t rawADC = 0;
 static volatile uint32_t adjusted_ADC = 0;
 static volatile uint32_t oversampled_ADC = 0;
@@ -126,7 +137,6 @@ static volatile boolean laddomat_on = false;
 
 // Variables for handling self-circulation in solar panels
 static volatile boolean anti_circulation = false;
-static volatile boolean anti_circ_first_run = true;
 static uint32_t anti_circ_timer = 0;
 const uint16_t anti_circ_delay = 10000;
 
@@ -137,7 +147,7 @@ static volatile boolean command_pending = true;
 
 // Initialize the storage arrays
 static volatile uint8_t datalog[ARRAY_SIZE];
-static volatile uint8_t templog[ARRAY_SIZE];
+static volatile uint8_t templog[SAMPLE_SIZE];
 
 // Error condition variables
 static volatile uint8_t twi_error_code = 0;
@@ -164,7 +174,7 @@ static volatile uint16_t twi_max_time = 2000;
 
 // Flags for contact with CTC Ecologic EXT
 static volatile boolean sync = false;
-static boolean first_run = true;
+//static boolean first_run = true;
 
 // TWI vars
 static volatile uint8_t twi_txBuffer[2];
@@ -176,6 +186,9 @@ static volatile uint8_t twi_rxBufferIndex = 0;
 
 // Watchdog reset check variable
 static volatile uint8_t mcu_reset = 0;
+
+// Temp counter
+static volatile uint8_t xx = 0;
 
 /*
   TWI ISR
@@ -359,8 +372,7 @@ ISR (SPI_STC_vect)
         sample_send = 0;                   // Reset now that we have sent everything
 
         // Reset the upper bits of system status flags
-        templog[0xCE] &= ~240;
-        datalog[0xCE] = templog[0xCE];
+        datalog[0xCE] &= ~240;
 
         // Send ow_sample_counter
         convert.nr_32 = ow_sample_counter;
@@ -452,6 +464,7 @@ ISR (SPI_STC_vect)
       break;
 
     case 0xF3:                                // Start command sequence to send cmd to digipot
+      static volatile uint8_t digi_cmd[2] = {0, 0};           // Command buffer for DigiPot
       SPDR = 0xD3;
       while (!(SPSR & (1 << SPIF)));          // Wait for next byte from Master
       digi_cmd[0] = SPDR;                     // Receive cmd+adress byte for digipot
@@ -573,6 +586,31 @@ ISR (SPI_STC_vect)
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
       sensor_calibration[SPDR] = convert.number;
       EEPROM.put((SPDR * sizeof(float)), sensor_calibration[SPDR]);
+      break;
+
+    case 0xA6:                        // Read sensor_value
+      SPDR = 0xB8;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.number = tempfiltered[SPDR][3];
+      SPDR = convert.nr_8[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[2];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[3];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xB8;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xA7:
+      xx = 0;
+      SPDR = sensor_status[xx];
+      while (xx++ < 11)
+      {
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master   
+        SPDR = sensor_status[xx];
+      }
       break;
 
     case 0xF8:                        // Read sensor_calibration
@@ -741,7 +779,7 @@ ISR (SPI_STC_vect)
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
 
       // Send system_status
-      SPDR = templog[0xCE];
+      SPDR = datalog[0xCE];
       while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
 
       // Send solar_temp
@@ -884,6 +922,7 @@ static uint8_t xfer(uint8_t data1, uint8_t data2)
   return clr;
 }
 
+/*
 static void measureAVcc()
 {
   // Save the ADC state and MUX
@@ -918,6 +957,7 @@ static void measureAVcc()
   ADMUX = saveADMUX;
   ADCSRA = saveADCSRA;
 }
+*/
 
 float getTemp(const DeviceAddress deviceaddress)
 {
@@ -966,11 +1006,9 @@ void setup()
 
   // Check the reset cause
   mcu_reset = MCUSR;
-  templog[0xCE] = (mcu_reset << 4);
+  datalog[0xCE] = (mcu_reset << 4);
+  sample_send |= 256;
   MCUSR = 0;
-
-  // Initialize WDT with 8 seconds timeout
-  wdt_enable(WDTO_4S);
 
   // Initialize ports
   // Disable all pull-ups
@@ -986,6 +1024,9 @@ void setup()
   // Set Port D7, D6 output, sample_ready signal and laddomat relay
   DDRD |= (1 << DDD7) | (1 << DDD6);
 
+  // Request a temperature conversion from OneWire sensors
+  requestTemp();
+
   // Initialize ADC
   // Clear ADMUX and set Vref to AVcc, ADC0 selected as source
   ADMUX = (1 << REFS0);
@@ -993,90 +1034,14 @@ void setup()
   // ADC enable, start first conversion, prescaler CLK/32 = 500kHz
   ADCSRA = (1 << ADEN) | (1 << ADSC) | (1 << ADPS2) | (1 << ADPS0);
 
-  // Initialize sensor calibration values from EEPROM
-  for (uint8_t x = 0; x < NUM_SENSORS; x++)
-  {
-    EEPROM.get((x * sizeof(float)), sensor_calibration[x]);
-    if ((sensor_calibration[x] < -2.0) || (sensor_calibration[x] > 2.0))	// Sanity check in case the EEPROM has been corrupted or is not programmed
-    {
-      sensor_calibration[x] = 0;
-      EEPROM.put((x * sizeof(float)), sensor_calibration[x]);
-    }
-  }
-
-  // Initialize Solar Panel On/Off - values
-  float stored_temp = 0.0;					// Temporary variable
-  EEPROM.get(256, stored_temp);
-  if ((stored_temp > 0.0) && (stored_temp > solar_off_temp))	// Sanity check in case the EEPROM has been corrupted or is not programmed
-    solar_on_temp = stored_temp;
-  else
-    EEPROM.put(256, solar_on_temp);
-  stored_temp = 0.0;
-  EEPROM.get((256 + sizeof(float)), stored_temp);
-  if ((stored_temp > 0.0) && (stored_temp < solar_on_temp))	// Sanity check in case the EEPROM has been corrupted or is not programmed
-    solar_off_temp = stored_temp;
-  else
-    EEPROM.put((256 + sizeof(float)), solar_off_temp);
-
-  // Initialize OneWire sensors
-  requestTemp();
-  delay(750);
-  for (uint8_t x = 0; x < NUM_SENSORS; x++)
-  {
-    DeviceAddress devicetemp;
-    memcpy_P (&devicetemp, tempsensor[x], sizeof (DeviceAddress));
-    float temperature = getTemp(devicetemp);
-    if (temperature != DEVICE_ERROR)
-    {
-      // Apply sensor calibration
-      temperature = temperature + sensor_calibration[x];
-
-      // Init the filter
-      owtemp[x][0] = temperature;
-      owtemp[x][1] = temperature;
-      owtemp[x][2] = temperature;
-      owtemp[x][3] = temperature;
-      tempfiltered[x][0] = temperature;
-      tempfiltered[x][1] = temperature;
-      tempfiltered[x][2] = temperature;
-
-      tempfiltered[x][3] = (owtemp[x][0] + owtemp[x][3] + 3 * (owtemp[x][1] + owtemp[x][2])) / 3.430944333e+04 + (0.8818931306 * tempfiltered[x][0]) + (-2.7564831952 * tempfiltered[x][1]) + (2.8743568927 * tempfiltered[x][2]);
-
-      if (x != 10)
-      {
-        float mediantemp = lrintf(tempfiltered[x][3] * 10.0) * 0.1;                 // Round to nearest, one decimal
-        templog[0xB0 + x * 2] = mediantemp;                                   // Split into integer and
-        templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100; // two decimals
-        datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
-        datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
-      }
-      else
-      {
-        convert.nr_16 = (int16_t)lrintf(tempfiltered[x][3]);
-        templog[0xB0 + x * 2] = convert.nr_8[0];                              // Split into high and
-        templog[0xB1 + x * 2] = convert.nr_8[1];                              // low part of int
-        datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
-        datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
-      }
-    }
-    else
-    {
-      if (x != 8 && x != 9)		// Hacky for now
-      {
-        sensor_error_code |= (1 << x);
-      }
-    }
-  }
-  requestTemp();
-
-  tank1_lower = lrintf(tempfiltered[0][3] * 10.0) * 0.1;
-  tank1_upper = lrintf(tempfiltered[1][3] * 10.0) * 0.1;
-  check_dhw = lrintf(tempfiltered[3][3]);
-  wood_burner_in = lrintf(tempfiltered[6][3] * 10.0) * 0.1;
-  wood_burner_out = lrintf(tempfiltered[7][3] * 10.0) * 0.1;
-  wood_burner_smoke = (int16_t)lrintf(tempfiltered[10][3]);
-
   // Initialize all the interfaces
+  // TWI slave interface to CTC EcoLogic EXT
+  // Set the slave address
+  TWAR = 0x5C << 1;
+
+  // Enable TWI module, acks and interrupt
+  TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWEA);
+
   // SPI slave interface to Raspberry Pi
   // Set Port B4 output, SPI MISO
   DDRB |= (1 << DDB4);
@@ -1109,15 +1074,33 @@ void setup()
   clr = UCSR0A;
   clr = UDR0;
 
-  // TWI slave interface to CTC EcoLogic EXT
-  // Set the slave address
-  TWAR = 0x5C << 1;
-
-  // Enable TWI module, acks and interrupt
-  TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWEA);
-
   // Command DigiPot RESET (command number 14)
   xfer(176, 0);
+
+  // Initialize sensor calibration values from EEPROM
+  for (uint8_t x = 0; x < NUM_SENSORS; x++)
+  {
+    EEPROM.get((x * sizeof(float)), sensor_calibration[x]);
+    if ((sensor_calibration[x] < -2.0) || (sensor_calibration[x] > 2.0))	// Sanity check in case the EEPROM has been corrupted or is not programmed
+    {
+      sensor_calibration[x] = 0;
+      EEPROM.put((x * sizeof(float)), sensor_calibration[x]);
+    }
+  }
+
+  // Initialize Solar Panel On/Off - values
+  float stored_temp = 0.0;					// Temporary variable
+  EEPROM.get(256, stored_temp);
+  if ((stored_temp > 0.0) && (stored_temp > solar_off_temp))	// Sanity check in case the EEPROM has been corrupted or is not programmed
+    solar_on_temp = stored_temp;
+  else
+    EEPROM.put(256, solar_on_temp);
+  stored_temp = 0.0;
+  EEPROM.get((256 + sizeof(float)), stored_temp);
+  if ((stored_temp > 0.0) && (stored_temp < solar_on_temp))	// Sanity check in case the EEPROM has been corrupted or is not programmed
+    solar_off_temp = stored_temp;
+  else
+    EEPROM.put((256 + sizeof(float)), solar_off_temp);
 
   // Wait for the ADC to finish the first conversion
   while ((ADCSRA & (1 << ADSC)));
@@ -1140,23 +1123,84 @@ void setup()
   solar_temp = lrintf(adcfiltered[3] * 10.0) * 0.1;     // Round to one decimal
 
   convert.number = solar_temp;
-  templog[0xCA] = convert.nr_8[0];
-  templog[0xCB] = convert.nr_8[1];
-  templog[0xCC] = convert.nr_8[2];
-  templog[0xCD] = convert.nr_8[3];
-  datalog[0xCA] = templog[0xCA];
-  datalog[0xCB] = templog[0xCB];
-  datalog[0xCC] = templog[0xCC];
-  datalog[0xCD] = templog[0xCD];
+  datalog[0xCA] = convert.nr_8[0];
+  datalog[0xCB] = convert.nr_8[1];
+  datalog[0xCC] = convert.nr_8[2];
+  datalog[0xCD] = convert.nr_8[3];
+  sample_send |= 256;
 
-  // Get a updated value of AVcc
-  measureAVcc();
+  // Wait for sensors to finish temperature conversion
+//  while (!oneWire.read_bit());
+
+  // Initialize OneWire sensors
+  DeviceAddress devicetemp;
+  float temperature = 0.0;
+  for (uint8_t x = 0; x < NUM_SENSORS; x++)
+  {
+    memcpy_P (&devicetemp, tempsensor[x], sizeof (DeviceAddress));
+    temperature = getTemp(devicetemp);
+    if (temperature != DEVICE_ERROR)
+    {
+      // Apply sensor calibration
+      temperature = temperature + sensor_calibration[x];
+
+      // Init the filter
+      owtemp[x][0] = temperature;
+      owtemp[x][1] = temperature;
+      owtemp[x][2] = temperature;
+      owtemp[x][3] = temperature;
+      tempfiltered[x][0] = temperature;
+      tempfiltered[x][1] = temperature;
+      tempfiltered[x][2] = temperature;
+
+      tempfiltered[x][3] = (owtemp[x][0] + owtemp[x][3] + 3 * (owtemp[x][1] + owtemp[x][2])) / 3.430944333e+04 + (0.8818931306 * tempfiltered[x][0]) + (-2.7564831952 * tempfiltered[x][1]) + (2.8743568927 * tempfiltered[x][2]);
+
+      if (x != 10)
+      {
+        temperature = lrintf(tempfiltered[x][3] * 10.0) * 0.1;
+        convert.nr_8[0] = temperature;						// Use this global var to save some room
+        convert.nr_8[1] = temperature * 100 - (uint8_t)temperature * 100;	// Use this global var to save some room
+      }
+      else
+      {
+        convert.nr_16 = (int16_t)lrintf(tempfiltered[x][3]);
+      }
+      datalog[0xB0 + x * 2] = convert.nr_8[0];
+      datalog[0xB1 + x * 2] = convert.nr_8[1];
+      sample_send |= 128;
+    }
+    else
+    // Result was DEVICE_ERROR
+    {
+      if (sensor_status[x] != 255)        // Is the sensor already disconnected?
+      {
+        sensor_status[x] == 1;         // Since this is setup, this is the first error
+      }
+    }
+  }
+  requestTemp();
+
+  tank1_lower = lrintf(tempfiltered[0][3] * 10.0) * 0.1;
+  tank1_upper = lrintf(tempfiltered[1][3] * 10.0) * 0.1;
+  check_dhw = lrintf(tempfiltered[3][3]);
+  wood_burner_in = lrintf(tempfiltered[6][3] * 10.0) * 0.1;
+  wood_burner_out = lrintf(tempfiltered[7][3] * 10.0) * 0.1;
+  wood_burner_smoke = (int16_t)lrintf(tempfiltered[10][3]);
 
   // Initialize the timekeeping vars
   lastTempRequest = millis();
   adc_lastCheck = lastTempRequest;
   lastCheck = lastTempRequest;
   twi_lastCheck = lastTempRequest;
+
+  // Wait until first TWI sample has been collected
+  while (!twi_sample_done);
+
+  // Initialize WDT with 4 seconds timeout
+  wdt_enable(WDTO_4S);
+
+  // Get a updated value of AVcc
+  //measureAVcc();
 } // end of setup
 
 void loop()
@@ -1164,25 +1208,23 @@ void loop()
   uint32_t time_now = millis();
 
   // Handle self-ciculation in solar panels
+  // Check if it is time to shut off anti-circ
+  if ((datalog[0xCF] & 256) && ((time_now - anti_circ_timer) >= anti_circ_delay))
+  {
+    datalog[0xCF] &= ~(1 << 0);
+    solar_pump_force_on = false;
+    sample_send |= 256;
+  }
+  // Check if we have been commanded to anti-circ
   if (anti_circulation && !solar_pump_force_off)
   {
-    if (anti_circ_first_run)
-    {
-      anti_circ_timer = time_now;
-      anti_circ_first_run = false;
-      solar_pump_force_on = true;
-    }
-    else
-    {
-      if ((time_now - anti_circ_timer) >= anti_circ_delay)
-      {
-        anti_circulation = false;
-        anti_circ_first_run = true;
-        solar_pump_force_on = false;
-      }
-    }
+    datalog[0xCF] |= (1 << 0);
+    anti_circ_timer = millis();
+    anti_circulation = false;
+    solar_pump_force_on = true;
+    sample_send |= 256;
   }
-
+  
   // Start checking the status of the newly taken sample versus the last sent
   if (twi_sample_done)
   {
@@ -1248,19 +1290,39 @@ void loop()
     start_sampling = true;      // Go for another auto sample!
     twi_sample_counter++;       // Increment the sample counter
 
-    if (sample_send & 127)
-      first_run = false;
+//    if (sample_send & 127)
+//      first_run = false;
+
   }
 
   if (ok_sample_ow && (time_now - lastTempRequest) >= delayInMillis)
   {
+    DeviceAddress devicetemp;
+    float temperature = 0.0;
     for (uint8_t x = 0; x < NUM_SENSORS; x++)
     {
-      DeviceAddress devicetemp;
       memcpy_P (&devicetemp, tempsensor[x], sizeof (DeviceAddress));
-      float temperature = getTemp(devicetemp);
+      temperature = getTemp(devicetemp);
       if (temperature != DEVICE_ERROR)
       {
+        if (sensor_status[x] >= 254)     // Has sensor been connected again?
+        {
+          if ((temperature == 85.0) && (sensor_status[x] != 254))  // Perhaps this is the first read of scratchpad?
+            sensor_status[x] = 254;
+          else
+          {
+            // Init the filter
+            owtemp[x][0] = temperature;
+            owtemp[x][1] = temperature;
+            owtemp[x][2] = temperature;
+            owtemp[x][3] = temperature;
+            tempfiltered[x][0] = temperature;
+            tempfiltered[x][1] = temperature;
+            tempfiltered[x][2] = temperature;   
+            tempfiltered[x][3] = temperature;   
+          }
+        }
+
         // Apply sensor calibration
         temperature = temperature + sensor_calibration[x];
 
@@ -1271,14 +1333,20 @@ void loop()
         if (x != 10)
         {
           if (temperature < (owtemp[x][3]+10.0) && temperature > (owtemp[x][3]-10.0))
+          {
             owtemp[x][3] = temperature;
+            sensor_status[x] = 0; // Reset the error counter
+          }
           else
             sensor_error_code |= (1 << x) | (1 << 14);
         }
         else
         {
           if (temperature < (owtemp[x][3]+75.0) && temperature > (owtemp[x][3]-75.0))
+          {
             owtemp[x][3] = temperature;
+            sensor_status[x] = 0; // Reset the error counter
+          }
           else
             sensor_error_code |= (1 << x) | (1 << 14);
         }
@@ -1290,34 +1358,87 @@ void loop()
 
         tempfiltered[x][3] = (owtemp[x][0] + owtemp[x][3] + 3 * (owtemp[x][1] + owtemp[x][2])) / 3.430944333e+04 + (0.8818931306 * tempfiltered[x][0]) + (-2.7564831952 * tempfiltered[x][1]) + (2.8743568927 * tempfiltered[x][2]);
 
+        // Check if we have a overflow condition
         if (x != 10)
         {
-          float mediantemp = lrintf(tempfiltered[x][3] * 10.0) * 0.1;
-          templog[0xB0 + x * 2] = mediantemp;
-          templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100;
+          if (tempfiltered[x][3] < -55.0 || tempfiltered[x][3] > 125.0)         // Sanity check
+          {
+            tempfiltered[x][3] = temperature;          // Somewhat hacky
+            datalog[0xCF] |= (1 << 1);
+            sample_send |= 256;
+          }
+          else
+          {
+            if ((datalog[0xCF] & 2))
+            {
+              datalog[0xCF] &= ~(1 << 1);
+              sample_send |= 256;
+            }
+          }
+          temperature = lrintf(tempfiltered[x][3] * 10.0) * 0.1;
+          convert.nr_8[0] = temperature;					// Use this global var to save some room
+          convert.nr_8[1] = temperature * 100 - (uint8_t)temperature * 100;	// Use this global var to save some room
         }
         else
         {
+          if (tempfiltered[x][3] < -250.0 || tempfiltered[x][3] > 1600.0)         // Sanity check
+          {
+            tempfiltered[x][3] = temperature;          // Somewhat hacky
+            datalog[0xCF] |= (1 << 1);
+            sample_send |= 256;
+          }
+          else
+          {
+            if ((datalog[0xCF] & 2))
+            {
+              datalog[0xCF] &= ~(1 << 1);
+              sample_send |= 256;
+            }
+          }
           convert.nr_16 = (int16_t)lrintf(tempfiltered[x][3]);
-          templog[0xB0 + x * 2] = convert.nr_8[0];                                      // Split into high and
-          templog[0xB1 + x * 2] = convert.nr_8[1];                                      // low part of int
+        }
+        // See if there has been a change since last sample?
+        if ((datalog[0xB0 + x * 2] != convert.nr_8[0]) || (datalog[0xB1 + x * 2] != convert.nr_8[1]))
+        {
+          datalog[0xB0 + x * 2] = convert.nr_8[0];
+          datalog[0xB1 + x * 2] = convert.nr_8[1];
+          sample_send |= 128;
         }
       }
       else
+      // Result was DEVICE_ERROR
       {
-	if (x != 8 && x != 9)		// Hacky for now
-          sensor_error_code |= (1 << x);
+        if (sensor_status[x] != 255)        // Is the sensor already disconnected?
+        {
+          sensor_status[x]++;               // Increase error counter
+          if (sensor_status[x] >= 2)        // 2 or more errors in a row?
+          {
+            sensor_error_code |= (1 << x);
+            if (sensor_status[x] >= 10)     // 10 errors in a row?
+            {
+              sensor_status[x] = 255;       // Regard sensor as disconnected
+              // Clear the filter
+              owtemp[x][0] = 0;
+              owtemp[x][1] = 0;
+              owtemp[x][2] = 0;
+              owtemp[x][3] = 0;
+              tempfiltered[x][0] = 0;
+              tempfiltered[x][1] = 0;
+              tempfiltered[x][2] = 0;
+              tempfiltered[x][3] = 0;
+              // Clear the datalog
+              datalog[0xB0 + x * 2] = 0;
+              datalog[0xB1 + x * 2] = 0;
+            }
+          }
+        }
       }
     }
+
     requestTemp();
-    lastTempRequest = time_now;
+    lastTempRequest = millis();
     ow_sample_counter++;
     ok_sample_ow = false;
-
-    // Check for change in ONEWIRE, normal every change of temp (could be ~750ms)
-    if (sync)
-      if (checkforchange(0xB0 , 0xAF + NUM_SENSORS * 2))
-        sample_send |= 128;
 
     tank1_lower = lrintf(tempfiltered[0][3] * 10.0) * 0.1;
     tank1_upper = lrintf(tempfiltered[1][3] * 10.0) * 0.1;
@@ -1352,7 +1473,20 @@ void loop()
 
       adcfiltered[3] = (adctemp[0] + adctemp[3] + 3 * (adctemp[1] + adctemp[2])) / 3.430944333e+04 + (0.8818931306 * adcfiltered[0]) + (-2.7564831952 * adcfiltered[1]) + (2.8743568927 * adcfiltered[2]);
 
-      solar_temp = lrintf(adcfiltered[3] * 10.0) * 0.1;     // Round to one decimal
+      if (adcfiltered[3] < -55.0 || adcfiltered[3] > 200.0)         // Sanity check
+      {
+        adcfiltered[3] = solar_raw;          // Somewhat hacky
+        datalog[0xCF] |= (1 << 2);
+        sample_send |= 256;
+      }
+      else
+      {
+        if ((datalog[0xCF] & 4))
+        {
+          datalog[0xCF] &= ~(1 << 2);
+          sample_send |= 256;
+        }
+      }
     }
     else
     {
@@ -1365,59 +1499,99 @@ void loop()
 
   if ((time_now - adc_lastCheck) >= adc_checkDelay)
   {
-    adc_lastCheck = time_now;
-    convert.number = solar_temp;
-    templog[0xCA] = convert.nr_8[0];
-    templog[0xCB] = convert.nr_8[1];
-    templog[0xCC] = convert.nr_8[2];
-    templog[0xCD] = convert.nr_8[3];
+    adc_lastCheck = millis();
+    if (adcfiltered[3] >= -55.0 && adcfiltered[3] <= 200.0)         // Sanity check
+    {
+      convert.number = lrintf(adcfiltered[3] * 10.0) * 0.1;     // Re-use global var and round to one decimal
+      if (solar_temp != convert.number)
+      {
+        solar_temp = convert.number;
+        datalog[0xCA] = convert.nr_8[0];
+        datalog[0xCB] = convert.nr_8[1];
+        datalog[0xCC] = convert.nr_8[2];
+        datalog[0xCD] = convert.nr_8[3];
+        sample_send |= 256;
+      }
+    }
   }
 
   if ((time_now - lastCheck) >= checkDelay)
   {
-    lastCheck = time_now;
+    lastCheck = millis();
 
     if ((solar_pump_on && (solar_temp <= (solar_off_temp + tank1_lower)) && !solar_pump_force_on) || solar_pump_force_off)
     {
       solar_pump_on = false;
       convert.number = solar_temp;
-      templog[0xCA] = convert.nr_8[0];
-      templog[0xCB] = convert.nr_8[1];
-      templog[0xCC] = convert.nr_8[2];
-      templog[0xCD] = convert.nr_8[3];
-      templog[0xCE] &= ~(1 << 0);
+      datalog[0xCA] = convert.nr_8[0];
+      datalog[0xCB] = convert.nr_8[1];
+      datalog[0xCC] = convert.nr_8[2];
+      datalog[0xCD] = convert.nr_8[3];
+      datalog[0xCE] &= ~(1 << 0);
+      sample_send |= 256;
     }
 
     if ((!solar_pump_on && (solar_temp >= (solar_on_temp + tank1_lower)) && !solar_pump_force_off) || solar_pump_force_on)
     {
       solar_pump_on = true;
       convert.number = solar_temp;
-      templog[0xCA] = convert.nr_8[0];
-      templog[0xCB] = convert.nr_8[1];
-      templog[0xCC] = convert.nr_8[2];
-      templog[0xCD] = convert.nr_8[3];
-      templog[0xCE] |= (1 << 0);
+      datalog[0xCA] = convert.nr_8[0];
+      datalog[0xCB] = convert.nr_8[1];
+      datalog[0xCC] = convert.nr_8[2];
+      datalog[0xCD] = convert.nr_8[3];
+      datalog[0xCE] |= (1 << 0);
+      sample_send |= 256;
     }
 
     if (laddomat_on && (wood_burner_smoke <= 100))
     {
       laddomat_on = false;
-      templog[0xCE] &= ~(1 << 1);
+      datalog[0xCE] &= ~(1 << 1);
+      sample_send |= 256;
     }
 
-	if (!laddomat_on && ((wood_burner_smoke > 100) && (wood_burner_out > 70.0)))
+    if (!laddomat_on && ((wood_burner_smoke > 100) && (wood_burner_out > 70.0)))
     {
       laddomat_on = true;
-      templog[0xCE] |= (1 << 1);
+      datalog[0xCE] |= (1 << 1);
+      sample_send |= 256;
     }
 
     if (check_dhw != dhw_ctc && check_dhw > 24 && check_dhw < 100)
       set_ctc_temp(check_dhw);
 
-    if (!first_run)
-      if (checkforchange(0xCA, 0xCE))
+    if (solar_pump_force_on)
+    {
+      if (!(datalog[0xCE] & 4))
+      {
+        datalog[0xCE] |= (1 << 2);
         sample_send |= 256;
-
+      }
+    }
+    else
+    {
+      if ((datalog[0xCE] & 4))
+      {
+        datalog[0xCE] &= ~(1 << 2);
+        sample_send |= 256;
+      }
+    }
+    if (solar_pump_force_off)
+    {
+      if (!(datalog[0xCE] & 8))
+      {
+        datalog[0xCE] |= (1 << 3);
+        sample_send |= 256;
+      }
+    }
+    else
+    {
+      if ((datalog[0xCE] & 8))
+      {
+        datalog[0xCE] &= ~(1 << 3);
+        sample_send |= 256;
+      }
+    }
     if (laddomat_on)
       PORTD |= (1 << PORTD6);     // Activate the laddomat relay
     else
@@ -1438,6 +1612,7 @@ void loop()
     {
       new_sample = true;
       PORTD |= (1 << PORTD7);     // Set the Interrupt signal HIGH
+      interrupts();               // Should NOT need this, unless something is VERY wrong...
     }
   }
 } // end of loop
