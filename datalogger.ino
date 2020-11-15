@@ -7,6 +7,12 @@
 #define VER_MINOR 0
 #define VER_BUILD 3
 
+#define DS2413_FAMILY_ID    0x3A
+#define DS2413_ACCESS_READ  0xF5
+#define DS2413_ACCESS_WRITE 0x5A
+#define DS2413_ACK_SUCCESS  0xAA
+#define DS2413_ACK_ERROR    0xFF
+
 #include <avr/pgmspace.h>
 #include <avr/wdt.h>
 #include <OneWire.h>
@@ -50,6 +56,12 @@ const DeviceAddress tempsensor[] PROGMEM = {0x28, 0x2E, 0xE8, 0x1D, 0x07, 0x00, 
                                             0x28, 0x99, 0x6D, 0x1C, 0x07, 0x00, 0x00, 0x94,    // Sensor9  =  Ej inkopplad
                                             0x3B, 0xFE, 0x20, 0x18, 0x00, 0x00, 0x00, 0x1F     // Sensor10 =  Rökgastemperatur  (Thermocouple type K, via MAX31850K)
                                            };
+
+uint8_t latch_a = 0;
+uint8_t latch_b = 0;
+uint8_t state = 0;
+const DeviceAddress DS2413 = {0x3A, 0xEF, 0x21, 0x18, 0x00, 0x00, 0x00, 0x83};
+
 // Array to hold error status and error counter, 255 = Disconnected sensor
 uint8_t sensor_status[] = {0,       // Sensor0
                            0,       // Sensor1
@@ -999,6 +1011,46 @@ void requestTemp()
   oneWire.write(0x44);
 }
 
+int8_t ds_read(const DeviceAddress deviceaddress)
+{
+  bool ok = false;
+  uint8_t results;
+
+  oneWire.reset();
+  oneWire.select(deviceaddress);
+  oneWire.write(DS2413_ACCESS_READ);
+
+  results = oneWire.read();                  // Get the register results
+  ok = (~results & 0x0F) == (results >> 4);  // Compare nibbles
+  results &= 0x0F;                           // Clear inverted values
+
+  oneWire.reset();
+
+  return ok ? results : -1;
+}
+
+bool ds_write(uint8_t state, const DeviceAddress deviceaddress)
+{
+  uint8_t ack = 0;
+
+  /* Top six bits must '1' */
+  state |= 0xFC;
+
+  oneWire.reset();
+  oneWire.select(deviceaddress);
+  oneWire.write(DS2413_ACCESS_WRITE);
+  oneWire.write(state);
+  oneWire.write(~state);                    /* Invert data and resend     */
+  ack = oneWire.read();                     /* 0xAA=success, 0xFF=failure */
+  if (ack == DS2413_ACK_SUCCESS)
+  {
+    oneWire.read();                         /* Read the status byte       */
+  }
+  oneWire.reset();
+
+  return (ack == DS2413_ACK_SUCCESS ? true : false);
+}
+
 void setup()
 {
   // Signal that we've started
@@ -1598,9 +1650,19 @@ void loop()
       PORTD &= ~(1 << PORTD6);    // De-Activate the laddomat relay
 
     if (solar_pump_on)
+    {
       PORTB |= (1 << PORTB1);     // Activate the solarpump relay
+      latch_a = 1;
+      state = ~((latch_b << 1) | (latch_a << 0));
+      ds_write(state, DS2413);
+    }
     else
+    {
       PORTB &= ~(1 << PORTB1);    // De-Activate the solarpump relay
+      latch_a = 0;
+      state = ~((latch_b << 1) | (latch_a << 0));
+      ds_write(state, DS2413);
+    }
 
     // Reset the watchdog timer
     wdt_reset();
