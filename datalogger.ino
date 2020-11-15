@@ -1,13 +1,20 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 1.2.132
+    ver 2.0.3
 **/
 
-#define VER_MAJOR 1
-#define VER_MINOR 2
-#define VER_BUILD 132
+#define VER_MAJOR 2
+#define VER_MINOR 0
+#define VER_BUILD 3
 
-#include <DallasTemperature.h>
+#define DS2413_FAMILY_ID    0x3A
+#define DS2413_ACCESS_READ  0xF5
+#define DS2413_ACCESS_WRITE 0x5A
+#define DS2413_ACK_SUCCESS  0xAA
+#define DS2413_ACK_ERROR    0xFF
+
+#include <avr/pgmspace.h>
+#include <avr/wdt.h>
 #include <OneWire.h>
 #include <EEPROM.h>
 
@@ -18,10 +25,10 @@
 #define NUM_MEDIAN 0    // Number of medians, if any
 
 // Number of connected OneWire sensors
-#define NUM_SENSORS 10
+#define NUM_SENSORS 11
 
 // Basic array sizes, just need to add the number of connected OneWire sensors
-#define ARRAY_SIZE 0xB0 + NUM_SENSORS * 2
+#define ARRAY_SIZE 0xD0
 #define SAMPLE_SIZE 0xAD
 
 // TWI buffer length
@@ -29,70 +36,121 @@
 
 // Data wire is plugged into port 2 on the Arduino
 #define ONE_WIRE_BUS 2
+#define DEVICE_ERROR -127
 
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
 OneWire oneWire(ONE_WIRE_BUS);
 
-// Pass our oneWire reference to Dallas Temperature.
-DallasTemperature sensors(&oneWire);
+typedef uint8_t DeviceAddress[8];
 
-// Array(s) to hold the adress of the connected devices
-DeviceAddress tempsensor[] = {0x28, 0x2E, 0xE8, 0x1D, 0x07, 0x00, 0x00, 0x80,    // Sensor0
-                              0x28, 0x67, 0x3A, 0x1E, 0x07, 0x00, 0x00, 0x36,    // Sensor1
-                              0x28, 0x6F, 0xD4, 0x28, 0x07, 0x00, 0x00, 0xAE,    // Sensor2
-                              0x28, 0xAC, 0x32, 0x1D, 0x07, 0x00, 0x00, 0xE7,    // Sensor3
-                              0x28, 0x0D, 0x73, 0x1D, 0x07, 0x00, 0x00, 0xA8,    // Sensor4
-                              0x28, 0xB7, 0x3B, 0x1D, 0x07, 0x00, 0x00, 0xB7,    // Sensor5
-                              0x28, 0x2E, 0x68, 0x1D, 0x07, 0x00, 0x00, 0x4B,    // Sensor6
-                              0x28, 0x20, 0x40, 0x1D, 0x07, 0x00, 0x00, 0x9E,    // Sensor7
-                              0x28, 0x41, 0x2B, 0x29, 0x07, 0x00, 0x00, 0x4D,    // Sensor8
-                              0x28, 0x99, 0x6D, 0x1C, 0x07, 0x00, 0x00, 0x94     // Sensor9
-                             };
+// Array to hold the adress of the connected devices
+const DeviceAddress tempsensor[] PROGMEM = {0x28, 0x2E, 0xE8, 0x1D, 0x07, 0x00, 0x00, 0x80,    // Sensor0  =  Tank 1 Nedre
+                                            0x28, 0x67, 0x3A, 0x1E, 0x07, 0x00, 0x00, 0x36,    // Sensor1  =  Tank 1 Övre
+                                            0x28, 0x6F, 0xD4, 0x28, 0x07, 0x00, 0x00, 0xAE,    // Sensor2  =  Tank 1 Element
+                                            0x28, 0xAC, 0x32, 0x1D, 0x07, 0x00, 0x00, 0xE7,    // Sensor3  =  Tank 1 Varmvatten
+                                            0x28, 0x0D, 0x73, 0x1D, 0x07, 0x00, 0x00, 0xA8,    // Sensor4  =  Tank 2 Nedre
+                                            0x28, 0x41, 0x2B, 0x29, 0x07, 0x00, 0x00, 0x4D,    // Sensor5  =  Tank 2 Övre
+                                            0x28, 0x2E, 0x68, 0x1D, 0x07, 0x00, 0x00, 0x4B,    // Sensor6  =  Panna IN
+                                            0x28, 0x20, 0x40, 0x1D, 0x07, 0x00, 0x00, 0x9E,    // Sensor7  =  Panna UT
+                                            0x28, 0xB7, 0x3B, 0x1D, 0x07, 0x00, 0x00, 0xB7,    // Sensor8  =  Tidigare Sensor5 (Trasig)
+                                            0x28, 0x99, 0x6D, 0x1C, 0x07, 0x00, 0x00, 0x94,    // Sensor9  =  Ej inkopplad
+                                            0x3B, 0xFE, 0x20, 0x18, 0x00, 0x00, 0x00, 0x1F     // Sensor10 =  Rökgastemperatur  (Thermocouple type K, via MAX31850K)
+                                           };
+
+uint8_t latch_a = 0;
+uint8_t latch_b = 0;
+uint8_t state = 0;
+const DeviceAddress DS2413 = {0x3A, 0xEF, 0x21, 0x18, 0x00, 0x00, 0x00, 0x83};
+
+// Array to hold error status and error counter, 255 = Disconnected sensor
+uint8_t sensor_status[] = {0,       // Sensor0
+                           0,       // Sensor1
+                           0,       // Sensor2
+                           0,       // Sensor3
+                           0,       // Sensor4
+                           0,       // Sensor5
+                           0,       // Sensor6
+                           0,       // Sensor7
+                           255,     // Sensor8
+                           255,     // Sensor9
+                           0        // Sensor10
+                          };
 
 float sensor_calibration[NUM_SENSORS];
 
-// A method for converting float to array of uint8_t and back
+// A method for converting numbers for transfer with SPI
 union Convert
 {
-  uint8_t buf[4];
+  uint8_t nr_8[4];
+  uint16_t nr_16;
+  uint32_t nr_32;
   float number;
 };
 
 static volatile union Convert convert;
 
 // Look-up table for controlling digipot to simulate 22K NTC between 26-98C
-const uint8_t temp[] = {16,   33,  52,  77,  94,
-                        109, 124, 145, 165, 178, 196, 213, 224, 239, 249,
-                        5,    17,  26,  35,  43,  55,  62,  71,  77,  84,
-                        91,   97, 107, 113, 119, 125, 130, 136, 141, 147,
-                        154, 159, 164, 169, 173, 178, 182, 186, 189, 193,
-                        196, 199, 203, 206, 208, 212, 216, 219, 221, 222,
-                        226, 228, 229, 231, 233, 236, 237, 240, 242, 244,
-                        245, 247, 248, 250, 251, 251, 252, 254
-                       };
+const uint8_t PROGMEM temp[] = {16,   33,  52,  77,  94,
+                                109, 124, 145, 165, 178, 196, 213, 224, 239, 249,
+                                5,    17,  26,  35,  43,  55,  62,  71,  77,  84,
+                                91,   97, 107, 113, 119, 125, 130, 136, 141, 147,
+                                154, 159, 164, 169, 173, 178, 182, 186, 189, 193,
+                                196, 199, 203, 206, 208, 212, 216, 219, 221, 222,
+                                226, 228, 229, 231, 233, 236, 237, 240, 242, 244,
+                                245, 247, 248, 250, 251, 251, 252, 254
+                               };
 
-// Command buffer for DigiPot
-static volatile uint8_t digi_cmd[2] = {0, 0};
 
 // Variable to hold actual temp of hot water
 static volatile uint8_t dhw_ctc = 75;
+static uint8_t check_dhw = 75;
 
 // Variables for handling sampling from OneWire sensors
-static float temperature, mediantemp = 0.0;
 //static float medtmp[NUM_SENSORS][NUM_MEDIAN];
 static float owtemp[NUM_SENSORS][4];
 static float tempfiltered[NUM_SENSORS][4];
 static uint32_t lastTempRequest = 0;
-static uint16_t delayInMillis = 2000;
+static uint32_t lastCheck = 0;
+const uint16_t delayInMillis = 750;
+const uint16_t checkDelay = 1000;
 
-// State machine declarations for SPI
-enum SPIState
-{
-  SPI_IDLE,
-  SPI_DUMP
-};
+// Variables for handling reading of the ADC
+//const float InternalReferenceVoltage = 1.100;  // Actually not measured... yet
+const float ReferenceResistor = 1270.0;        // Actually not measured... yet
+//static volatile float AnalogReferenceVoltage = 3.300;   // Ideally it should be this... but we measure it later
+static volatile uint16_t rawADC = 0;
+static volatile uint32_t adjusted_ADC = 0;
+static volatile uint32_t oversampled_ADC = 0;
+const uint8_t nr_extra_bits = 2;                           // Number of additional bits over 10
+const uint16_t nr_oversamples = 1 << (nr_extra_bits * 2);  // Number of oversamples needed
+const uint32_t adc_divisor = 1024UL << nr_extra_bits;      // Divisor to be used
+const float lsb_adjust = (1 + nr_extra_bits) * 0.5;        // Adjustment since we cant reach max value
+static volatile uint16_t sample_counter = 0;
+// static volatile float voltage_in = 0.0;
+static volatile float solar_temp = 0.0;
+static float solar_on_temp = 10.0;
+static float solar_off_temp = 4.0;
+static volatile boolean adcDone = false;
+static float tank1_lower = 0.0;
+static float tank1_upper = 0.0;
+static float wood_burner_in = 0.0;
+static float wood_burner_out = 0.0;
+static int16_t wood_burner_smoke = 0;
+static float adctemp[4];
+static float adcfiltered[4];
+static uint32_t adc_lastCheck = 0;
+const uint16_t adc_checkDelay = 2000;
 
-static volatile SPIState spi_state = SPI_IDLE;
+// Variables to control relays
+static volatile boolean solar_pump_on = false;
+static volatile boolean solar_pump_force_on = false;
+static volatile boolean solar_pump_force_off = false;
+static volatile boolean laddomat_on = false;
+
+// Variables for handling self-circulation in solar panels
+static volatile boolean anti_circulation = false;
+static uint32_t anti_circ_timer = 0;
+const uint16_t anti_circ_delay = 10000;
 
 // Buffer and variables for SPI -> TWI command transfer
 static volatile uint8_t spi_cmd[2] = { 0xDE, 0x64 };
@@ -101,24 +159,34 @@ static volatile boolean command_pending = true;
 
 // Initialize the storage arrays
 static volatile uint8_t datalog[ARRAY_SIZE];
-static volatile uint8_t templog[ARRAY_SIZE];
+static volatile uint8_t templog[SAMPLE_SIZE];
 
-// Debug vars
-static volatile uint8_t test1, test2, test3, test4, test6, test7, test8, slask_tx1, slask_tx2, slask_rx1, slask_rx2 = 0;
-static volatile uint16_t test5 = 0;
+// Error condition variables
+static volatile uint8_t twi_error_code = 0;
+static volatile uint32_t twi_sample_counter = 0;
+static volatile uint32_t twi_bus_error_counter = 0;
+static volatile uint16_t sensor_error_code = 0;
+static volatile uint32_t ow_sample_counter = 0;
+static volatile uint8_t adc_error_code = 0;
 
 // Counter...
 static volatile uint8_t count = 0;
 
 // Flags for sampling complete / available for transfer
 static volatile boolean twi_sample_done = false;
-static volatile boolean new_twi_sample, new_ow_sample = false;
-static volatile uint8_t twi_sample_send = B01111111;
-static volatile uint8_t ow_sample_send = B00000000;
+static volatile boolean new_sample = false;
+static volatile uint16_t sample_send = 0;
 static volatile boolean start_sampling = true;
+static volatile boolean ok_sample_ow = false;
+static uint32_t twi_lastCheck = 0;
+static uint16_t twi_sampletime = 0;
+static volatile uint16_t twi_accum_time = 0;
+static volatile uint16_t twi_min_time = 3000;
+static volatile uint16_t twi_max_time = 2000;
 
 // Flags for contact with CTC Ecologic EXT
 static volatile boolean sync = false;
+//static boolean first_run = true;
 
 // TWI vars
 static volatile uint8_t twi_txBuffer[2];
@@ -127,6 +195,12 @@ static volatile uint8_t twi_txBufferLength = 0;
 
 static volatile uint8_t twi_rxBuffer[TWI_BUFFER_LENGTH];
 static volatile uint8_t twi_rxBufferIndex = 0;
+
+// Watchdog reset check variable
+static volatile uint8_t mcu_reset = 0;
+
+// Temp counter
+static volatile uint8_t xx = 0;
 
 /*
   TWI ISR
@@ -159,14 +233,14 @@ ISR (TWI_vect)
       else
       {
         // No room, NOT ACK will be returned
-        test2 |= 2;   // Debug
+        twi_error_code |= 2;   // Debug
         TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
       }
       break;
 
     case 0x88:          // Previously addressed with own SLA+W; data has been received; NOT ACK has been returned
     case 0x98:          // Previously addressed with general call; data has been received; NOT ACK has been returned
-      test2 |= 4;   // Debug
+      twi_error_code |= 4;   // Debug
       // NOT ACK will be returned
       TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
       break;
@@ -248,18 +322,18 @@ ISR (TWI_vect)
 
     // TWI Errors
     case 0xF8:          // No relevant state information available; TWINT = "0"
-      test2 |= 32;      // Debug
+      twi_error_code |= 32;      // Debug
       break;
 
     case 0x00:          // Bus Error due to an illegal START or STOP condition
-      test1++;                        // Debug
-      test2 |= 64;                    // Debug
+      twi_bus_error_counter++;                        // Debug
+      twi_error_code |= 64;                    // Debug
       // Release bus and reset TWI hardware
       TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT) | (1 << TWEA) | (1 << TWSTO);
       break;
 
     default:
-      test2 |= 128;                   // Debug
+      twi_error_code |= 128;                   // Debug
   }
 }  // end of TWI ISR
 
@@ -268,267 +342,498 @@ ISR (TWI_vect)
 */
 ISR (SPI_STC_vect)
 {
-  switch (spi_state)
+  switch (SPDR)
   {
-    case SPI_IDLE:
-      switch (SPDR)
+    case 0xFF:                        // NO-OP/PING
+      SPDR = 0xDF;
+      if (!sync)                      // Not in sync with TWI Master
+        SPDR = 0x00;
+      else if (!new_sample)
+        SPDR = 0x01;                  // In sync with TWI Master, no new sample available
+      break;
+
+    case 0xF0:                        // Array transfer command
+      if (!sync)                      // Not in sync with TWI Master
+        SPDR = 0x00;
+      else if (!new_sample && sample_send == 0)
+        SPDR = 0x01;
+      else
       {
-        case 0xFF:                        // NO-OP/PING
-          if (!sync)                      // Not in sync with TWI Master
-            SPDR = 0x00;
-          else if (!new_twi_sample && !new_ow_sample)
-            SPDR = 0x01;                  // In sync with TWI Master, no new sample available
-          break;
+        PORTD &= ~(1 << PORTD7);     // Set the Interrupt signal LOW
+        SPDR = 0xFA;
+        while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+        convert.nr_16 = sample_send;
+        SPDR = convert.nr_8[0];
+        while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
+        SPDR = convert.nr_8[1];
+        while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
+        SPDR = 0xFD;                   // Access SPDR to clear SPIF
 
-        case 0xF0:                        // Array transfer command
-          if (!sync)                      // Not in sync with TWI Master
-            SPDR = 0x00;
-          else if (!new_twi_sample && !new_ow_sample) // In sync with TWI Master, no new sample available
-            SPDR = 0x01;
-          else
+        while (!(SPSR & (1 << SPIF)));     // Wait for next byte from Master
+
+        while (SPDR < ARRAY_SIZE)
+        {
+          while (SPDR < ARRAY_SIZE)        // Continue as long we get requests within the array size
           {
-            SPDR = 0xFA;
-            while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
-            if (new_ow_sample)
-            {
-              SPDR = ow_sample_send;
-              while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
-              SPDR = 0xFD;                   // Access SPDR to clear SPIF
-              if (!new_twi_sample)
-                PORTD &= ~(1 << PORTD7);     // Set the Interrupt signal LOW
-            }
-            else if (new_twi_sample)
-            {
-              SPDR = twi_sample_send;
-              while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
-              SPDR = 0xFD;                   // Access SPDR to clear SPIF
-              if (!new_ow_sample)
-                PORTD &= ~(1 << PORTD7);     // Set the Interrupt signal LOW
-            }
-            spi_state = SPI_DUMP;            // We're in sync and a new sample is available, start transfer
+            SPDR = datalog[SPDR];
+            while (!(SPSR & (1 << SPIF))); // Wait for next byte from Master
           }
-          break;
+          while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+        }
+        new_sample = false;
+        sample_send = 0;                   // Reset now that we have sent everything
 
-        case 0xF1:                        // Start command transfer to TWI Master
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          if (command_pending)            // Signal that we already have a unhandled command waiting
-            SPDR = 0xFF;
-          else
-            spi_cmd[0] = SPDR;            // First byte of command sequence
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          if (command_pending)            // Signal that we already have a unhandled command waiting
-            SPDR = 0xFF;
-          else
-            spi_cmd[1] = SPDR;            // Second byte of command sequence
-          command_pending = true;
-          break;
+        // Reset the upper bits of system status flags
+        datalog[0xCE] &= ~240;
 
-        case 0xF2:                        // Start DigiPot temp setting sequence
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          set_ctc_temp(SPDR);             // Receive the temperature and set it
-          SPDR = dhw_ctc;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = 0xFF;
-          break;
+        // Send ow_sample_counter
+        convert.nr_32 = ow_sample_counter;
+        SPDR = convert.nr_8[0];          // Load with number of ow_samples we've collected since last time, MSByte
+        while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+        SPDR = convert.nr_8[1];          // Load with number of ow_samples we've collected since last time, LSByte
+        while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+        SPDR = convert.nr_8[2];          // Load with number of ow_samples we've collected since last time, LSByte
+        while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+        SPDR = convert.nr_8[3];          // Load with number of ow_samples we've collected since last time, LSByte
+        while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
 
-        case 0xF3:                                // Start command sequence to send cmd to digipot
-          while (!(SPSR & (1 << SPIF)));          // Wait for next byte from Master
-          digi_cmd[0] = SPDR;                     // Receive cmd+adress byte for digipot
-          while (!(SPSR & (1 << SPIF)));          // Wait for next byte from Master
-          digi_cmd[1] = SPDR;                     // Receive data byte for digipot
-          SPDR = xfer(digi_cmd[0], digi_cmd[1]);  // Transfer to digipot and receive answer
-          while (!(SPSR & (1 << SPIF)));          // Wait for next byte from Master
-          SPDR = 0xFF;
-          break;
+        // Send twi_sample_counter
+        convert.nr_32 = twi_sample_counter;
+        SPDR = convert.nr_8[0];          // Load with number of twi_samples we've collected since last time
+        while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+        SPDR = convert.nr_8[1];          // Load with number of twi_samples we've collected since last time
+        while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+        SPDR = convert.nr_8[2];          // Load with number of twi_samples we've collected since last time
+        while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+        SPDR = convert.nr_8[3];          // Load with number of twi_samples we've collected since last time
+        while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
 
-        case 0xF4:                        // Send version number
-          SPDR = VER_MAJOR;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = VER_MINOR;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = VER_BUILD;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = 0xFF;                    // Access SPDR to clear SPIF
-          break;
+        // Send twi timing vars
+        convert.nr_16 = twi_min_time;
+        SPDR = convert.nr_8[0];
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+        SPDR = convert.nr_8[1];
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+        convert.nr_16 = twi_max_time;
+        SPDR = convert.nr_8[0];
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+        SPDR = convert.nr_8[1];
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+        convert.nr_16 = twi_accum_time;
+        SPDR = convert.nr_8[0];
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+        SPDR = convert.nr_8[1];
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
 
-        case 0xF5:                        // Fetch ALL debug variables
+        // Send twi_error_code
+        SPDR = twi_error_code;                   // Bitflags of TWI error conditions
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+        // If twi_error_code contains error bit6 then Send twi_bus_error_counter
+        if (twi_error_code & 64)
+        {
+          convert.nr_32 = twi_bus_error_counter;          // Number of TWI bus errors due to illegal START or STOP condition
+          SPDR = convert.nr_8[0];
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = test1;
+          SPDR = convert.nr_8[1];
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = test2;
+          SPDR = convert.nr_8[2];
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = test3;
+          SPDR = convert.nr_8[3];
           while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = count;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = twi_rxBuffer[0];
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = twi_rxBuffer[1];
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = twi_txBuffer[0];
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = twi_txBuffer[1];
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = slask_rx1;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = slask_rx2;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = slask_tx1;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = slask_tx2;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = 0xFF;                    // Access SPDR to clear SPIF
-          break;
+        }
+        twi_error_code = 0;
 
-        case 0xF6:                        // Release bus and reset TWI hardware
-          TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT) | (1 << TWEA) | (1 << TWSTO);
-          if (!sync)                      // Not in sync with TWI Master
-            SPDR = 0x00;
-          else if (!new_twi_sample && !new_ow_sample)
-            SPDR = 0x01;                  // In sync with TWI Master, no new sample available
-          else
-            SPDR = 0xFE;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = 0xFF;                    // Access SPDR to clear SPIF
-          break;
+        // Send sensor_error_code
+        convert.nr_16 = sensor_error_code;
+        SPDR = convert.nr_8[0];
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+        SPDR = convert.nr_8[1];
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+        sensor_error_code = 0;
 
-        case 0xF7:                        // Program sensor_calibration
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          convert.buf[0] = SPDR;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          convert.buf[1] = SPDR;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          convert.buf[2] = SPDR;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          convert.buf[3] = SPDR;
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          sensor_calibration[SPDR] = convert.number;
-          EEPROM.put((SPDR * sizeof(float)), sensor_calibration[SPDR]);
-          break;
+        // Send adc_error_code
+        SPDR = adc_error_code;
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+        adc_error_code = 0;
 
-        case 0xF8:                        // Read sensor_calibration
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          convert.number = sensor_calibration[SPDR];
-          SPDR = convert.buf[0];
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = convert.buf[1];
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = convert.buf[2];
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = convert.buf[3];
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = 0xFF;                    // Access SPDR to clear SPIF
-          break;
-
-        case 0xA0:
-          SPDR = test1;                   // Number of TWI bus errors due to illegal START or STOP condition
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = 0xFF;                    // Access SPDR to clear SPIF
-          break;
-
-        case 0xA1:
-          SPDR = test2;                   // Bitflags of TWI error conditions
-          while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
-          SPDR = 0xFF;                    // Access SPDR to clear SPIF
-          break;
-
-        case 0xA2:
-          SPDR = test3;
-          break;
-
-        case 0xA3:
-          SPDR = count;
-          break;
-
-        case 0xA4:
-          SPDR = twi_rxBuffer[0];
-          break;
-
-        case 0xA5:
-          SPDR = twi_rxBuffer[1];
-          break;
-
-        case 0xA6:
-          SPDR = twi_txBuffer[0];
-          break;
-
-        case 0xA7:
-          SPDR = twi_txBuffer[1];
-          break;
-
-        case 0xA8:
-          SPDR = slask_rx1;
-          break;
-
-        case 0xA9:
-          SPDR = slask_rx2;
-          break;
-
-        case 0xAA:
-          SPDR = slask_tx1;
-          break;
-
-        case 0xAB:
-          SPDR = slask_tx2;
-          break;
-
-        case 0xAF:
-          test1 = 0;
-          test2 = 0;
-          test3 = 0;
-          slask_tx1 = 0;
-          slask_tx2 = 0;
-          slask_rx1 = 0;
-          slask_rx2 = 0;
-          SPDR = 0xAF;
-          break;
+        SPDR = 0xD0;                    // Access SPDR to clear SPIF
       }
       break;
 
-    case SPI_DUMP:                         // Routine for transferring data
-      if (SPDR < ARRAY_SIZE)               // Request for something in the array?
-      {
-        while (SPDR < ARRAY_SIZE)          // Continue as long we get requests within the array size
-        {
-          SPDR = datalog[SPDR];
-          while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
-        }
-      }
+    case 0xF1:                        // Start command transfer to TWI Master
+      SPDR = 0xD1;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      if (command_pending)            // Signal that we already have a unhandled command waiting
+        SPDR = 0xFF;
       else
+        spi_cmd[0] = SPDR;            // First byte of command sequence
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      if (command_pending)            // Signal that we already have a unhandled command waiting
+        SPDR = 0xFF;
+      else
+        spi_cmd[1] = SPDR;            // Second byte of command sequence
+      command_pending = true;
+      break;
+
+    case 0xF3:                                // Start command sequence to send cmd to digipot
+      static volatile uint8_t digi_cmd[2] = {0, 0};           // Command buffer for DigiPot
+      SPDR = 0xD3;
+      while (!(SPSR & (1 << SPIF)));          // Wait for next byte from Master
+      digi_cmd[0] = SPDR;                     // Receive cmd+adress byte for digipot
+      while (!(SPSR & (1 << SPIF)));          // Wait for next byte from Master
+      digi_cmd[1] = SPDR;                     // Receive data byte for digipot
+      SPDR = xfer(digi_cmd[0], digi_cmd[1]);  // Transfer to digipot and receive answer
+      while (!(SPSR & (1 << SPIF)));          // Wait for next byte from Master
+      SPDR = 0xD3;
+      break;
+
+    case 0xF4:                        // Send version number
+      SPDR = VER_MAJOR;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = VER_MINOR;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = VER_BUILD;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = mcu_reset;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.number = solar_on_temp;
+      SPDR = convert.nr_8[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[2];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[3];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.number = solar_off_temp;
+      SPDR = convert.nr_8[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[2];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[3];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xD4;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xF5:                        // Fetch ALL debug variables
+      SPDR = 0xD5;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
+      // Send TWI_bus_error_counter
+      convert.nr_32 = twi_bus_error_counter;	// Number of TWI bus errors due to illegal START or STOP condition
+      SPDR = convert.nr_8[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[2];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[3];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
+      // Send TWI_error_code
+      SPDR = twi_error_code;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
+      // Send sensor_error_code
+      convert.nr_16 = sensor_error_code;
+      SPDR = convert.nr_8[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
+      // Send count
+      SPDR = count;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
+      // Send TWI buffers
+      SPDR = twi_rxBuffer[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = twi_rxBuffer[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = twi_txBuffer[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = twi_txBuffer[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = twi_rxBuffer[2];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = twi_rxBuffer[3];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      twi_rxBuffer[2] = 0;
+      twi_rxBuffer[3] = 0;
+
+      // Send some boolean variables
+      SPDR = start_sampling;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = twi_sample_done;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = ok_sample_ow;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xD5;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xF6:                        // Release bus and reset TWI hardware
+      SPDR = 0xD6;
+      TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWINT) | (1 << TWEA) | (1 << TWSTO);
+      start_sampling = true;
+      if (!sync)                      // Not in sync with TWI Master
+        SPDR = 0x00;
+      else if (!new_sample)
+        SPDR = 0x01;                  // In sync with TWI Master, no new sample available
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xD6;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xF7:                        // Program sensor_calibration
+      SPDR = 0xD7;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.nr_8[0] = SPDR;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.nr_8[1] = SPDR;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.nr_8[2] = SPDR;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.nr_8[3] = SPDR;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      sensor_calibration[SPDR] = convert.number;
+      EEPROM.put((SPDR * sizeof(float)), sensor_calibration[SPDR]);
+      break;
+
+    case 0xA6:                        // Read sensor_value
+      SPDR = 0xB8;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.number = tempfiltered[SPDR][3];
+      SPDR = convert.nr_8[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[2];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[3];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xB8;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xA7:
+      xx = 0;
+      SPDR = sensor_status[xx];
+      while (xx++ < 11)
       {
-        if (SPDR == 0xFF)                  // NO-OP/PING
-        {
-          SPDR = 0xFF;
-          break;
-        }
-        if (SPDR == 0xF0)
-        {
-          SPDR = (test5 >> 8);             // Load with number of ow_samples we've collected since last time, MSByte
-          while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
-          SPDR = (test5 & 0xFF);           // Load with number of ow_samples we've collected since last time, LSByte
-          while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
-          SPDR = 0xFF;                     // Access SPDR to clear SPIF
-          test5 = 0;
-          spi_state = SPI_IDLE;
-          new_ow_sample = false;
-          ow_sample_send = 0;              // Reset now that we've sent everything
-          break;
-        }
-        if (SPDR == 0xF1)
-        {
-          SPDR = test4;                    // Load with number of twi_samples we've collected since last time
-          while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
-          SPDR = 0xFF;                     // Access SPDR to clear SPIF
-          test4 = 0;
-          spi_state = SPI_IDLE;
-          new_twi_sample = false;
-          twi_sample_send = 0;             // Reset now that we've sent everything
-          break;
-        }
+        while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master   
+        SPDR = sensor_status[xx];
       }
+      break;
+
+    case 0xF8:                        // Read sensor_calibration
+      SPDR = 0xD8;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.number = sensor_calibration[SPDR];
+      SPDR = convert.nr_8[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[2];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[3];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xD8;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xF9:                        // Collect debug variables
+      convert.nr_16 = twi_min_time;
+      SPDR = convert.nr_8[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.nr_16 = twi_max_time;
+      SPDR = convert.nr_8[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.nr_16 = twi_accum_time;
+      SPDR = convert.nr_8[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xD9;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xFA:                        // Toggle the state of solar_pump_force_on
+      solar_pump_force_on = !solar_pump_force_on;
+      if (solar_pump_force_off && solar_pump_force_on)  // Not both true at the same time
+        solar_pump_force_on = false;
+      SPDR = solar_pump_force_on;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xDA;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xFB:                        // Toggle the state of solar_pump_force_off
+      solar_pump_force_off = !solar_pump_force_off;
+      if (solar_pump_force_on && solar_pump_force_off)  // Not both true at the same time
+        solar_pump_force_off = false;
+      SPDR = solar_pump_force_off;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xDB;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xFC:
+      laddomat_on = true;
+      SPDR = laddomat_on;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xDC;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xFD:
+      laddomat_on = false;
+      SPDR = laddomat_on;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xDD;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xFE:
+      anti_circulation = true;
+      SPDR = anti_circulation;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xDE;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xA0:
+      convert.nr_32 = twi_bus_error_counter;          // Number of TWI bus errors due to illegal START or STOP condition
+      SPDR = convert.nr_8[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[2];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[3];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xB0;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xA1:
+      // Send ow_sample_counter
+      convert.nr_32 = ow_sample_counter;
+      SPDR = convert.nr_8[0];          // Load with number of ow_samples we've collected since last time, MSByte
+      while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+      SPDR = convert.nr_8[1];          // Load with number of ow_samples we've collected since last time, LSByte
+      while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+      SPDR = convert.nr_8[2];          // Load with number of ow_samples we've collected since last time, LSByte
+      while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+      SPDR = convert.nr_8[3];          // Load with number of ow_samples we've collected since last time, LSByte
+      while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+
+      // Send twi_sample_counter
+      convert.nr_32 = twi_sample_counter;
+      SPDR = convert.nr_8[0];          // Load with number of twi_samples we've collected since last time
+      while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+      SPDR = convert.nr_8[1];          // Load with number of twi_samples we've collected since last time
+      while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+      SPDR = convert.nr_8[2];          // Load with number of twi_samples we've collected since last time
+      while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+      SPDR = convert.nr_8[3];          // Load with number of twi_samples we've collected since last time
+      while (!(SPSR & (1 << SPIF)));   // Wait for next byte from Master
+
+      // Send twi_error_code
+      SPDR = twi_error_code;                   // Bitflags of TWI error conditions
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = 0xB1;                    // Access SPDR to clear SPIF
+      break;
+
+    case 0xA2:
+      twi_min_time = 3000;
+      twi_max_time = 2000;
+      twi_accum_time = 0;
+      SPDR = 0xB2;
+      break;
+
+    case 0xA3:                        // Program solar_on_temp
+      SPDR = 0xB3;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.nr_8[0] = SPDR;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.nr_8[1] = SPDR;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.nr_8[2] = SPDR;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.nr_8[3] = SPDR;
+      solar_on_temp = convert.number;
+      EEPROM.put(256, solar_on_temp);
+      break;
+
+    case 0xA4:                        // Program solar_off_temp
+      SPDR = 0xB4;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.nr_8[0] = SPDR;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.nr_8[1] = SPDR;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.nr_8[2] = SPDR;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      convert.nr_8[3] = SPDR;
+      solar_off_temp = convert.number;
+      EEPROM.put((256 + sizeof(float)), solar_off_temp);
+      break;
+
+    case 0xA5:                        // Fetch ALL debug variables
+      SPDR = 0xB5;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
+      // Send adjusted_ADC
+      convert.nr_32 = adjusted_ADC;// The oversampled value of ADC
+      SPDR = convert.nr_8[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[2];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[3];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
+      // Send system_status
+      SPDR = datalog[0xCE];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
+      // Send solar_temp
+      convert.number = solar_temp;     // The actual solar_temp
+      SPDR = convert.nr_8[0];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[1];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[2];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+      SPDR = convert.nr_8[3];
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
+      // Send solar_pump_on
+      SPDR = solar_pump_on;
+      while (!(SPSR & (1 << SPIF)));  // Wait for next byte from Master
+
+      SPDR = 0xD5;                    // Access SPDR to clear SPIF
+      break;
+
+    default:
+      SPDR = 0xAA;
       break;
   }
 } // end of SPI ISR
+
+/*
+  ADC ISR
+*/
+ISR (ADC_vect)
+{
+  oversampled_ADC += ADC;
+
+  if (++sample_counter >= nr_oversamples)
+  {
+    ADCSRA &= ~((1 << ADATE) | (1 << ADIE));
+    adcDone = true;
+    adjusted_ADC = (oversampled_ADC >> nr_extra_bits);
+    oversampled_ADC = 0;
+    sample_counter = 0;
+  }
+} // end of ADC ISR
 
 #if NUM_MEDIAN == 3
 static float median3(float *f)
@@ -593,7 +898,7 @@ static void set_ctc_temp(uint8_t t)
   else if (t > 40)
   {
     dhw_ctc = t;
-    xfer(32, temp[t - 26] + dir); // Load input registers
+    xfer(32, pgm_read_byte_near(&temp[t - 26]) + dir); // Load input registers
     xfer(33, 255);
     xfer(104, 0);                 // Transfer input registers to RDACs
   }
@@ -601,7 +906,7 @@ static void set_ctc_temp(uint8_t t)
   {
     dhw_ctc = t;
     xfer(32, 0);                  // Load input registers
-    xfer(33, temp[t - 26] + dir);
+    xfer(33, pgm_read_byte_near(&temp[t - 26]) + dir);
     xfer(104, 0);                 // Transfer input registers to RDACs
   }
 }
@@ -629,73 +934,172 @@ static uint8_t xfer(uint8_t data1, uint8_t data2)
   return clr;
 }
 
+/*
+static void measureAVcc()
+{
+  // Save the ADC state and MUX
+  uint8_t saveADCSRA = ADCSRA;
+  uint8_t saveADMUX = ADMUX;
+
+  // Disable interrupt and auto trigger
+  ADCSRA &= ~((1 << ADIE) | (1 << ADATE));
+
+  // Clear and select AVcc as reference and Bandgap voltage as source
+  ADMUX = (1 << REFS0) | (1 << MUX3) | (1 << MUX2) | (1 << MUX1);
+
+  // Set prescaler to CLK/128 = 125kHz
+  ADCSRA |= (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
+
+  // Wait for the ADC to finish any previous conversion
+  while ((ADCSRA & (1 << ADSC)));
+
+  // Wait for Vbg to stabilize
+  delayMicroseconds(350);
+
+  // Clear the flag and start a new conversion
+  ADCSRA |= (1 << ADSC) | (1 << ADIF);
+
+  while (!(ADCSRA & (1 << ADIF)));       // Wait for the ADC to finish conversion
+  rawADC = ADC;
+
+  // Calculate the value of AVcc
+  AnalogReferenceVoltage = InternalReferenceVoltage / (rawADC + 0.5) * 1024.0;
+
+  // Reset the ADC state
+  ADMUX = saveADMUX;
+  ADCSRA = saveADCSRA;
+}
+*/
+
+float getTemp(const DeviceAddress deviceaddress)
+{
+  oneWire.reset();
+  oneWire.select(deviceaddress);
+  oneWire.write(0xBE);
+  uint8_t scratch[9];
+  for (uint8_t i = 0; i < 9; i++)
+    scratch[i] = oneWire.read();
+  if (oneWire.crc8(scratch, 8) == scratch[8])
+  {
+    int16_t raw = (int16_t)(scratch[1] << 8) | (int16_t)scratch[0];
+    switch (deviceaddress[0])
+    {
+      case 0x28:
+        if (raw >= -880 && raw <= 2000)		// Equal to -55 and +125 temperature
+          return (float)raw * 0.0625;
+        break;
+      case 0x3B:
+        if (!(scratch[0] & 1))
+        {
+          if (raw >= -4000 && raw <= 25600)	// Equal to -250 and +1600 temperature
+            return (float)raw * 0.0625;
+        }
+        else
+        {
+          sensor_error_code |= ((scratch[2] & 7) << 11);
+        }
+        break;
+    }
+  }
+  return DEVICE_ERROR;
+}
+
+void requestTemp()
+{
+  oneWire.reset();
+  oneWire.skip();
+  oneWire.write(0x44);
+}
+
+int8_t ds_read(const DeviceAddress deviceaddress)
+{
+  bool ok = false;
+  uint8_t results;
+
+  oneWire.reset();
+  oneWire.select(deviceaddress);
+  oneWire.write(DS2413_ACCESS_READ);
+
+  results = oneWire.read();                  // Get the register results
+  ok = (~results & 0x0F) == (results >> 4);  // Compare nibbles
+  results &= 0x0F;                           // Clear inverted values
+
+  oneWire.reset();
+
+  return ok ? results : -1;
+}
+
+bool ds_write(uint8_t state, const DeviceAddress deviceaddress)
+{
+  uint8_t ack = 0;
+
+  /* Top six bits must '1' */
+  state |= 0xFC;
+
+  oneWire.reset();
+  oneWire.select(deviceaddress);
+  oneWire.write(DS2413_ACCESS_WRITE);
+  oneWire.write(state);
+  oneWire.write(~state);                    /* Invert data and resend     */
+  ack = oneWire.read();                     /* 0xAA=success, 0xFF=failure */
+  if (ack == DS2413_ACK_SUCCESS)
+  {
+    oneWire.read();                         /* Read the status byte       */
+  }
+  oneWire.reset();
+
+  return (ack == DS2413_ACK_SUCCESS ? true : false);
+}
+
 void setup()
 {
+  // Signal that we've started
+  sensor_error_code |= (1 << 15);
+
+  // Check the reset cause
+  mcu_reset = MCUSR;
+  datalog[0xCE] = (mcu_reset << 4);
+  sample_send |= 256;
+  MCUSR = 0;
+
   // Initialize ports
   // Disable all pull-ups
   MCUCR |= (1 << PUD);
 
-  // Initialize sensor calibration values from EEPROM
-  for (uint8_t x = 0; x < NUM_SENSORS; x++)
-    EEPROM.get((x * sizeof(float)), sensor_calibration[x]);
-
-  // Initialize OneWire sensors
-  sensors.begin();
-  sensors.setResolution(12);                  // We want all sensors at 12 bit
-  sensors.requestTemperatures();              // We have to guarantee that the array contains a valid temperature before we start the main program
-  for (uint8_t x = 0; x < NUM_SENSORS; x++)
-  {
-    temperature = sensors.getTempC(tempsensor[x]);
-    if (temperature != DEVICE_DISCONNECTED_C)
-    {
-      // Apply sensor calibration
-      temperature = temperature + sensor_calibration[x];
-
-      mediantemp = lrintf(temperature * 10.0) * 0.1;                        // Round to nearest, one decimal
-      templog[0xB0 + x * 2] = mediantemp;                                   // Split into integer and
-      templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100; // two decimals
-      datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
-      datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
-
-      // Init the filter
-      owtemp[x][0] = temperature;
-      owtemp[x][1] = temperature;
-      owtemp[x][2] = temperature;
-      owtemp[x][3] = temperature;
-      tempfiltered[x][0] = temperature;
-      tempfiltered[x][1] = temperature;
-      tempfiltered[x][2] = temperature;
-      tempfiltered[x][3] = temperature;
-    }
-    else
-    {
-      templog[0xB0 + x * 2] = 0;
-      templog[0xB1 + x * 2] = 0;
-      datalog[0xB0 + x * 2] = templog[0xB0 + x * 2];
-      datalog[0xB1 + x * 2] = templog[0xB1 + x * 2];
-    }
-  }
-  sensors.setWaitForConversion(false);        // Now that we have a starting value in the array we don't have to wait for conversions anymore
-  sensors.requestTemperatures();
-  lastTempRequest = millis();
-
-  // Initialize ports
-  // Set Port B1, B0 output
+  // Set Port B1, B0 output, solarpump relay
   DDRB |= (1 << DDB1) | (1 << DDB0);
 
-  // Set Port C0, C1, C2, C3 analog input
+  // Set Port C0, C1, C2, C3 analog input, disable digital buffers to save power
   DDRC &= ~((1 << DDC3) | (1 << DDC2) | (1 << DDC1) | (1 << DDC0));
   DIDR0 |= (1 << ADC3D) | (1 << ADC2D) | (1 << ADC1D) | (1 << ADC0D);
 
-  // Set Port D7, D6 output, sample_ready signal
+  // Set Port D7, D6 output, sample_ready signal and laddomat relay
   DDRD |= (1 << DDD7) | (1 << DDD6);
 
+  // Request a temperature conversion from OneWire sensors
+  requestTemp();
+
+  // Initialize ADC
+  // Clear ADMUX and set Vref to AVcc, ADC0 selected as source
+  ADMUX = (1 << REFS0);
+
+  // ADC enable, start first conversion, prescaler CLK/32 = 500kHz
+  ADCSRA = (1 << ADEN) | (1 << ADSC) | (1 << ADPS2) | (1 << ADPS0);
+
   // Initialize all the interfaces
+  // TWI slave interface to CTC EcoLogic EXT
+  // Set the slave address
+  TWAR = 0x5C << 1;
+
+  // Enable TWI module, acks and interrupt
+  TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWEA);
+
   // SPI slave interface to Raspberry Pi
   // Set Port B4 output, SPI MISO
   DDRB |= (1 << DDB4);
 
-  // Interrupt enabled, SPI enabled, MSB first, Slave, CLK low when idle, Sample on leading edge of CLK (SPI Mode 0)
+  // Interrupt enabled, SPI enabled, MSB first, Slave, CLK high when idle, Sample on leading edge of CLK (SPI Mode 0)
+//  SPCR = (1 << SPIE) | (1 << SPE) | (1 << CPOL);
   SPCR = (1 << SPIE) | (1 << SPE);
 
   // Clear the registers
@@ -709,8 +1113,8 @@ void setup()
   // Set Port D4 output, Port D5 output: SPI CLK, SS
   DDRD |= (1 << DDD4) | (1 << DDD5);
 
-  // Enable USART0 SPI Master Mode, MSB first, CLK low when idle, Sample on trailing edge of CLK (Mode 1)
-  UCSR0C = (1 << UMSEL01) | (1 << UMSEL00) | (1 << UCPHA0);
+  // Enable USART0 SPI Master Mode, MSB first, CLK high when idle, Sample on leading edge of CLK (SPI Mode 2)
+  UCSR0C = (1 << UMSEL01) | (1 << UMSEL00) | (1 << UCPOL0);
 
   // Enable USART0 SPI Master Mode receiver and transmitter
   UCSR0B = (1 << RXEN0) | (1 << TXEN0);
@@ -722,27 +1126,255 @@ void setup()
   clr = UCSR0A;
   clr = UDR0;
 
-  // TWI slave interface to CTC EcoLogic EXT
-  // Set the slave address
-  TWAR = 0x5C << 1;
-
-  // Enable TWI module, acks and interrupt
-  TWCR = (1 << TWEN) | (1 << TWIE) | (1 << TWEA);
-
   // Command DigiPot RESET (command number 14)
   xfer(176, 0);
 
+  // Initialize sensor calibration values from EEPROM
+  for (uint8_t x = 0; x < NUM_SENSORS; x++)
+  {
+    EEPROM.get((x * sizeof(float)), sensor_calibration[x]);
+    if ((sensor_calibration[x] < -2.0) || (sensor_calibration[x] > 2.0))	// Sanity check in case the EEPROM has been corrupted or is not programmed
+    {
+      sensor_calibration[x] = 0;
+      EEPROM.put((x * sizeof(float)), sensor_calibration[x]);
+    }
+  }
+
+  // Initialize Solar Panel On/Off - values
+  float stored_temp = 0.0;					// Temporary variable
+  EEPROM.get(256, stored_temp);
+  if ((stored_temp > 0.0) && (stored_temp > solar_off_temp))	// Sanity check in case the EEPROM has been corrupted or is not programmed
+    solar_on_temp = stored_temp;
+  else
+    EEPROM.put(256, solar_on_temp);
+  stored_temp = 0.0;
+  EEPROM.get((256 + sizeof(float)), stored_temp);
+  if ((stored_temp > 0.0) && (stored_temp < solar_on_temp))	// Sanity check in case the EEPROM has been corrupted or is not programmed
+    solar_off_temp = stored_temp;
+  else
+    EEPROM.put((256 + sizeof(float)), solar_off_temp);
+
+  // Wait for the ADC to finish the first conversion
+  while ((ADCSRA & (1 << ADSC)));
+  float solar_resistor = ReferenceResistor / ((1024.0 / (ADC + 0.5)) - 1.0);	// Only one sample used
+  float solar_raw = (solar_resistor - 1000.0) / 3.75;
+
+  // Input for filter
+  adctemp[0] = solar_raw;
+  adctemp[1] = solar_raw;
+  adctemp[2] = solar_raw;
+  adctemp[3] = solar_raw;
+
+  // Butterworth filter with cutoff frequency 0.01*sample frequency (FS=1.33Hz)
+  adcfiltered[0] = solar_raw;
+  adcfiltered[1] = solar_raw;
+  adcfiltered[2] = solar_raw;
+
+  adcfiltered[3] = (adctemp[0] + adctemp[3] + 3 * (adctemp[1] + adctemp[2])) / 3.430944333e+04 + (0.8818931306 * adcfiltered[0]) + (-2.7564831952 * adcfiltered[1]) + (2.8743568927 * adcfiltered[2]);
+
+  solar_temp = lrintf(adcfiltered[3] * 10.0) * 0.1;     // Round to one decimal
+
+  convert.number = solar_temp;
+  datalog[0xCA] = convert.nr_8[0];
+  datalog[0xCB] = convert.nr_8[1];
+  datalog[0xCC] = convert.nr_8[2];
+  datalog[0xCD] = convert.nr_8[3];
+  sample_send |= 256;
+
+  // Wait for sensors to finish temperature conversion
+//  while (!oneWire.read_bit());
+
+  // Initialize OneWire sensors
+  DeviceAddress devicetemp;
+  float temperature = 0.0;
+  for (uint8_t x = 0; x < NUM_SENSORS; x++)
+  {
+    memcpy_P (&devicetemp, tempsensor[x], sizeof (DeviceAddress));
+    temperature = getTemp(devicetemp);
+    if (temperature != DEVICE_ERROR)
+    {
+      // Apply sensor calibration
+      temperature = temperature + sensor_calibration[x];
+
+      // Init the filter
+      owtemp[x][0] = temperature;
+      owtemp[x][1] = temperature;
+      owtemp[x][2] = temperature;
+      owtemp[x][3] = temperature;
+      tempfiltered[x][0] = temperature;
+      tempfiltered[x][1] = temperature;
+      tempfiltered[x][2] = temperature;
+
+      tempfiltered[x][3] = (owtemp[x][0] + owtemp[x][3] + 3 * (owtemp[x][1] + owtemp[x][2])) / 3.430944333e+04 + (0.8818931306 * tempfiltered[x][0]) + (-2.7564831952 * tempfiltered[x][1]) + (2.8743568927 * tempfiltered[x][2]);
+
+      if (x != 10)
+      {
+        temperature = lrintf(tempfiltered[x][3] * 10.0) * 0.1;
+        convert.nr_8[0] = temperature;						// Use this global var to save some room
+        convert.nr_8[1] = temperature * 100 - (uint8_t)temperature * 100;	// Use this global var to save some room
+      }
+      else
+      {
+        convert.nr_16 = (int16_t)lrintf(tempfiltered[x][3]);
+      }
+      datalog[0xB0 + x * 2] = convert.nr_8[0];
+      datalog[0xB1 + x * 2] = convert.nr_8[1];
+      sample_send |= 128;
+    }
+    else
+    // Result was DEVICE_ERROR
+    {
+      if (sensor_status[x] != 255)        // Is the sensor already disconnected?
+      {
+        sensor_status[x] == 1;         // Since this is setup, this is the first error
+      }
+    }
+  }
+  requestTemp();
+
+  tank1_lower = lrintf(tempfiltered[0][3] * 10.0) * 0.1;
+  tank1_upper = lrintf(tempfiltered[1][3] * 10.0) * 0.1;
+  check_dhw = lrintf(tempfiltered[3][3]);
+  wood_burner_in = lrintf(tempfiltered[6][3] * 10.0) * 0.1;
+  wood_burner_out = lrintf(tempfiltered[7][3] * 10.0) * 0.1;
+  wood_burner_smoke = (int16_t)lrintf(tempfiltered[10][3]);
+
+  // Initialize the timekeeping vars
+  lastTempRequest = millis();
+  adc_lastCheck = lastTempRequest;
+  lastCheck = lastTempRequest;
+  twi_lastCheck = lastTempRequest;
+
+  // Wait until first TWI sample has been collected
+  while (!twi_sample_done);
+
+  // Initialize WDT with 4 seconds timeout
+  wdt_enable(WDTO_4S);
+
+  // Get a updated value of AVcc
+  //measureAVcc();
 } // end of setup
 
 void loop()
 {
-  if (millis() - lastTempRequest >= delayInMillis)
+  uint32_t time_now = millis();
+
+  // Handle self-ciculation in solar panels
+  // Check if it is time to shut off anti-circ
+  if ((datalog[0xCF] & 256) && ((time_now - anti_circ_timer) >= anti_circ_delay))
   {
+    datalog[0xCF] &= ~(1 << 0);
+    solar_pump_force_on = false;
+    sample_send |= 256;
+  }
+  // Check if we have been commanded to anti-circ
+  if (anti_circulation && !solar_pump_force_off)
+  {
+    datalog[0xCF] |= (1 << 0);
+    anti_circ_timer = millis();
+    anti_circulation = false;
+    solar_pump_force_on = true;
+    sample_send |= 256;
+  }
+  
+  // Start checking the status of the newly taken sample versus the last sent
+  if (twi_sample_done)
+  {
+    // Insert current DHW value into templog
+    templog[0x8C] = check_dhw;
+
+    ok_sample_ow = true;
+
+    twi_sampletime = time_now - twi_lastCheck;
+    if (twi_sampletime > 0)
+      twi_accum_time = (twi_accum_time + twi_sampletime) * 0.5;
+    else
+      twi_accum_time = twi_sampletime;
+
+    if (twi_sampletime < twi_min_time)
+      twi_min_time = twi_sampletime;
+
+    if (twi_sampletime > twi_max_time)
+      twi_max_time = twi_sampletime;
+
+    // Check for change in SYSTIME, normal every minute
+    if (checkforchange(0x73 , 0x75))
+      sample_send |= 1;
+
+    // Check for change in CURRENT, normal every change of temp
+    if (checkforchange(0x8C , 0x99))
+      sample_send |= 2;
+    if (checkforchange(0x9B , 0xA0))
+      sample_send |= 2;
+    if (checkforchange(0xA8 , 0xAD))
+      sample_send |= 2;
+
+    // Check for change in HISTORICAL, normal every hour and week
+    if (checkforchange(0x76 , 0x7E))
+      sample_send |= 4;
+    if (checkforchange(0x80 , 0x84))
+      sample_send |= 4;
+    if (checkforchange(0x87 , 0x8B))
+      sample_send |= 4;
+
+    // Check for change in SETTINGS, hardly ever any changes
+    if (checkforchange(0x00 , 0x68))
+      sample_send |= 8;
+
+    // Check for change in ALARMS, almost never ever any changes
+    if (checkforchange(0xA1 , 0xA4))
+      sample_send |= 16;
+
+    // Check for change in LAST_24H,  normal change once every hour
+    if (checkforchange(0x85 , 0x86))
+      sample_send |= 32;
+    if (checkforchange(0x7F , 0x7F))
+      sample_send |= 32;
+
+    // Check for change in STATUS, normal change every minute
+    if (checkforchange(0x9A , 0x9A))
+      sample_send |= 64;
+    if (checkforchange(0xA5 , 0xA7))
+      sample_send |= 64;
+
+    twi_sample_done = false;
+    twi_lastCheck = millis();
+    start_sampling = true;      // Go for another auto sample!
+    twi_sample_counter++;       // Increment the sample counter
+
+//    if (sample_send & 127)
+//      first_run = false;
+
+  }
+
+  if (ok_sample_ow && (time_now - lastTempRequest) >= delayInMillis)
+  {
+    DeviceAddress devicetemp;
+    float temperature = 0.0;
     for (uint8_t x = 0; x < NUM_SENSORS; x++)
     {
-      temperature = sensors.getTempC(tempsensor[x]);
-      if (temperature != DEVICE_DISCONNECTED_C)
+      memcpy_P (&devicetemp, tempsensor[x], sizeof (DeviceAddress));
+      temperature = getTemp(devicetemp);
+      if (temperature != DEVICE_ERROR)
       {
+        if (sensor_status[x] >= 254)     // Has sensor been connected again?
+        {
+          if ((temperature == 85.0) && (sensor_status[x] != 254))  // Perhaps this is the first read of scratchpad?
+            sensor_status[x] = 254;
+          else
+          {
+            // Init the filter
+            owtemp[x][0] = temperature;
+            owtemp[x][1] = temperature;
+            owtemp[x][2] = temperature;
+            owtemp[x][3] = temperature;
+            tempfiltered[x][0] = temperature;
+            tempfiltered[x][1] = temperature;
+            tempfiltered[x][2] = temperature;   
+            tempfiltered[x][3] = temperature;   
+          }
+        }
+
         // Apply sensor calibration
         temperature = temperature + sensor_calibration[x];
 
@@ -750,106 +1382,299 @@ void loop()
         owtemp[x][0] = owtemp[x][1];
         owtemp[x][1] = owtemp[x][2];
         owtemp[x][2] = owtemp[x][3];
-        owtemp[x][3] = temperature;
+        if (x != 10)
+        {
+          if (temperature < (owtemp[x][3]+10.0) && temperature > (owtemp[x][3]-10.0))
+          {
+            owtemp[x][3] = temperature;
+            sensor_status[x] = 0; // Reset the error counter
+          }
+          else
+            sensor_error_code |= (1 << x) | (1 << 14);
+        }
+        else
+        {
+          if (temperature < (owtemp[x][3]+75.0) && temperature > (owtemp[x][3]-75.0))
+          {
+            owtemp[x][3] = temperature;
+            sensor_status[x] = 0; // Reset the error counter
+          }
+          else
+            sensor_error_code |= (1 << x) | (1 << 14);
+        }
 
         // Butterworth filter with cutoff frequency 0.01*sample frequency (FS=1.33Hz)
         tempfiltered[x][0] = tempfiltered[x][1];
         tempfiltered[x][1] = tempfiltered[x][2];
         tempfiltered[x][2] = tempfiltered[x][3];
+
         tempfiltered[x][3] = (owtemp[x][0] + owtemp[x][3] + 3 * (owtemp[x][1] + owtemp[x][2])) / 3.430944333e+04 + (0.8818931306 * tempfiltered[x][0]) + (-2.7564831952 * tempfiltered[x][1]) + (2.8743568927 * tempfiltered[x][2]);
 
-/*
-        // Fill the median temporary storage
-        medtmp[x][0] = lrintf(tempfiltered[x][0] * 10.0) * 0.1;
-        medtmp[x][1] = lrintf(tempfiltered[x][1] * 10.0) * 0.1;
-        medtmp[x][2] = lrintf(tempfiltered[x][2] * 10.0) * 0.1;
-        medtmp[x][3] = lrintf(tempfiltered[x][3] * 10.0) * 0.1;
-        medtmp[x][4] = lrintf(tempfiltered[x][4] * 10.0) * 0.1;
-        medtmp[x][5] = lrintf(tempfiltered[x][5] * 10.0) * 0.1;
+        // Check if we have a overflow condition
+        if (x != 10)
+        {
+          if (tempfiltered[x][3] < -55.0 || tempfiltered[x][3] > 125.0)         // Sanity check
+          {
+            tempfiltered[x][3] = temperature;          // Somewhat hacky
+            datalog[0xCF] |= (1 << 1);
+            sample_send |= 256;
+          }
+          else
+          {
+            if ((datalog[0xCF] & 2))
+            {
+              datalog[0xCF] &= ~(1 << 1);
+              sample_send |= 256;
+            }
+          }
+          temperature = lrintf(tempfiltered[x][3] * 10.0) * 0.1;
+          convert.nr_8[0] = temperature;					// Use this global var to save some room
+          convert.nr_8[1] = temperature * 100 - (uint8_t)temperature * 100;	// Use this global var to save some room
+        }
+        else
+        {
+          if (tempfiltered[x][3] < -250.0 || tempfiltered[x][3] > 1600.0)         // Sanity check
+          {
+            tempfiltered[x][3] = temperature;          // Somewhat hacky
+            datalog[0xCF] |= (1 << 1);
+            sample_send |= 256;
+          }
+          else
+          {
+            if ((datalog[0xCF] & 2))
+            {
+              datalog[0xCF] &= ~(1 << 1);
+              sample_send |= 256;
+            }
+          }
+          convert.nr_16 = (int16_t)lrintf(tempfiltered[x][3]);
+        }
+        // See if there has been a change since last sample?
+        if ((datalog[0xB0 + x * 2] != convert.nr_8[0]) || (datalog[0xB1 + x * 2] != convert.nr_8[1]))
+        {
+          datalog[0xB0 + x * 2] = convert.nr_8[0];
+          datalog[0xB1 + x * 2] = convert.nr_8[1];
+          sample_send |= 128;
+        }
+      }
+      else
+      // Result was DEVICE_ERROR
+      {
+        if (sensor_status[x] != 255)        // Is the sensor already disconnected?
+        {
+          sensor_status[x]++;               // Increase error counter
+          if (sensor_status[x] >= 2)        // 2 or more errors in a row?
+          {
+            sensor_error_code |= (1 << x);
+            if (sensor_status[x] >= 10)     // 10 errors in a row?
+            {
+              sensor_status[x] = 255;       // Regard sensor as disconnected
+              // Clear the filter
+              owtemp[x][0] = 0;
+              owtemp[x][1] = 0;
+              owtemp[x][2] = 0;
+              owtemp[x][3] = 0;
+              tempfiltered[x][0] = 0;
+              tempfiltered[x][1] = 0;
+              tempfiltered[x][2] = 0;
+              tempfiltered[x][3] = 0;
+              // Clear the datalog
+              datalog[0xB0 + x * 2] = 0;
+              datalog[0xB1 + x * 2] = 0;
+            }
+          }
+        }
+      }
+    }
 
-        mediantemp = lrintf(median6(medtmp[x]) * 10.0) * 0.1;
-//        mediantemp = median6(medtmp[x]);
-*/
+    requestTemp();
+    lastTempRequest = millis();
+    ow_sample_counter++;
+    ok_sample_ow = false;
 
-        mediantemp = lrintf(tempfiltered[x][3] * 10.0) * 0.1;
-        templog[0xB0 + x * 2] = mediantemp;
-        templog[0xB1 + x * 2] = mediantemp * 100 - (uint8_t)mediantemp * 100;
+    tank1_lower = lrintf(tempfiltered[0][3] * 10.0) * 0.1;
+    tank1_upper = lrintf(tempfiltered[1][3] * 10.0) * 0.1;
+    check_dhw = lrintf(tempfiltered[3][3]);
+    wood_burner_in = lrintf(tempfiltered[6][3] * 10.0) * 0.1;
+    wood_burner_out = lrintf(tempfiltered[7][3] * 10.0) * 0.1;
+    wood_burner_smoke = (int16_t)lrintf(tempfiltered[10][3]);
+  }
+
+  if (adcDone)
+  {
+    adcDone = false;
+    // voltage_in = AnalogReferenceVoltage * (adjusted_ADC + lsb_adjust) / adc_divisor;
+    float solar_resistor = ReferenceResistor / ((adc_divisor / (adjusted_ADC + lsb_adjust)) - 1.0);
+    float solar_raw = (solar_resistor - 1000.0) / 3.75;
+
+    if (solar_raw >= -55.0 && solar_raw <= 200.0)
+    {
+      // Input for filter
+      adctemp[0] = adctemp[1];
+      adctemp[1] = adctemp[2];
+      adctemp[2] = adctemp[3];
+      if (solar_raw < (adctemp[3]+10.0) && solar_raw > (adctemp[3]-10.0))
+        adctemp[3] = solar_raw;
+      else
+        adc_error_code |= (1 << 0) | (1 << 1);
+
+      // Butterworth filter with cutoff frequency 0.01*sample frequency (FS=1.33Hz)
+      adcfiltered[0] = adcfiltered[1];
+      adcfiltered[1] = adcfiltered[2];
+      adcfiltered[2] = adcfiltered[3];
+
+      adcfiltered[3] = (adctemp[0] + adctemp[3] + 3 * (adctemp[1] + adctemp[2])) / 3.430944333e+04 + (0.8818931306 * adcfiltered[0]) + (-2.7564831952 * adcfiltered[1]) + (2.8743568927 * adcfiltered[2]);
+
+      if (adcfiltered[3] < -55.0 || adcfiltered[3] > 200.0)         // Sanity check
+      {
+        adcfiltered[3] = solar_raw;          // Somewhat hacky
+        datalog[0xCF] |= (1 << 2);
+        sample_send |= 256;
       }
       else
       {
-        templog[0xB0 + x * 2] = 0;
-        templog[0xB1 + x * 2] = 0;
+        if ((datalog[0xCF] & 4))
+        {
+          datalog[0xCF] &= ~(1 << 2);
+          sample_send |= 256;
+        }
       }
     }
-    sensors.requestTemperatures();
-    lastTempRequest = millis();
-    test5++;
-
-    // Check for change in ONEWIRE, normal every change of temp (could be ~750ms)
-    if (sync)
-      if (checkforchange(0xB0 , 0xAF + NUM_SENSORS * 2))
-        ow_sample_send = B10000000;
-
-    if (ow_sample_send != 0)
+    else
     {
-      PORTD &= ~(1 << PORTD7);    // Set the Interrupt signal LOW
-      new_ow_sample = true;
-      PORTD |= (1 << PORTD7);     // Set the Interrupt signal HIGH
+      if (solar_raw > 200.0)	// Could indicate an open circuit
+        adc_error_code |= (1 << 0) | (1 << 2);
+      if (solar_raw < -55.0)    // Could indicate a short circuit
+        adc_error_code |= (1 << 0) | (1 << 3);
     }
   }
 
-  // Start checking the status of the newly taken sample versus the last sent
-  if (twi_sample_done)
+  if ((time_now - adc_lastCheck) >= adc_checkDelay)
   {
-    // Check for change in SYSTIME, normal every minute
-    if (checkforchange(0x73 , 0x75))
-      twi_sample_send |= B00000001;
-
-    // Check for change in CURRENT, normal every change of temp
-    if (checkforchange(0x8C , 0x99))
-      twi_sample_send |= B00000010;
-    if (checkforchange(0x9B , 0xA0))
-      twi_sample_send |= B00000010;
-    if (checkforchange(0xA8 , 0xAD))
-      twi_sample_send |= B00000010;
-
-    // Check for change in HISTORICAL, normal every hour and week
-    if (checkforchange(0x76 , 0x7E))
-      twi_sample_send |= B00000100;
-    if (checkforchange(0x80 , 0x84))
-      twi_sample_send |= B00000100;
-    if (checkforchange(0x87 , 0x8B))
-      twi_sample_send |= B00000100;
-
-    // Check for change in SETTINGS, hardly ever any changes
-    if (checkforchange(0x00 , 0x68))
-      twi_sample_send |= B00001000;
-
-    // Check for change in ALARMS, almost never ever any changes
-    if (checkforchange(0xA1 , 0xA4))
-      twi_sample_send |= B00010000;
-
-    // Check for change in LAST_24H,  normal change once every hour
-    if (checkforchange(0x85 , 0x86))
-      twi_sample_send |= B00100000;
-    if (checkforchange(0x7F , 0x7F))
-      twi_sample_send |= B00100000;
-
-    // Check for change in STATUS, normal change every minute
-    if (checkforchange(0x9A , 0x9A))
-      twi_sample_send |= B01000000;
-    if (checkforchange(0xA5 , 0xA7))
-      twi_sample_send |= B01000000;
-
-    twi_sample_done = false;
-    start_sampling = true;      // Go for another auto sample!
-    test4++;                    // Increment the sample counter
-
-    if (twi_sample_send != 0)
+    adc_lastCheck = millis();
+    if (adcfiltered[3] >= -55.0 && adcfiltered[3] <= 200.0)         // Sanity check
     {
-      PORTD &= ~(1 << PORTD7);    // Set the Interrupt signal LOW
-      new_twi_sample = true;
+      convert.number = lrintf(adcfiltered[3] * 10.0) * 0.1;     // Re-use global var and round to one decimal
+      if (solar_temp != convert.number)
+      {
+        solar_temp = convert.number;
+        datalog[0xCA] = convert.nr_8[0];
+        datalog[0xCB] = convert.nr_8[1];
+        datalog[0xCC] = convert.nr_8[2];
+        datalog[0xCD] = convert.nr_8[3];
+        sample_send |= 256;
+      }
+    }
+  }
+
+  if ((time_now - lastCheck) >= checkDelay)
+  {
+    lastCheck = millis();
+
+    if ((solar_pump_on && (solar_temp <= (solar_off_temp + tank1_lower)) && !solar_pump_force_on) || solar_pump_force_off)
+    {
+      solar_pump_on = false;
+      convert.number = solar_temp;
+      datalog[0xCA] = convert.nr_8[0];
+      datalog[0xCB] = convert.nr_8[1];
+      datalog[0xCC] = convert.nr_8[2];
+      datalog[0xCD] = convert.nr_8[3];
+      datalog[0xCE] &= ~(1 << 0);
+      sample_send |= 256;
+    }
+
+    if ((!solar_pump_on && (solar_temp >= (solar_on_temp + tank1_lower)) && !solar_pump_force_off) || solar_pump_force_on)
+    {
+      solar_pump_on = true;
+      convert.number = solar_temp;
+      datalog[0xCA] = convert.nr_8[0];
+      datalog[0xCB] = convert.nr_8[1];
+      datalog[0xCC] = convert.nr_8[2];
+      datalog[0xCD] = convert.nr_8[3];
+      datalog[0xCE] |= (1 << 0);
+      sample_send |= 256;
+    }
+
+    if (laddomat_on && (wood_burner_smoke <= 100))
+    {
+      laddomat_on = false;
+      datalog[0xCE] &= ~(1 << 1);
+      sample_send |= 256;
+    }
+
+    if (!laddomat_on && ((wood_burner_smoke > 100) && (wood_burner_out > 70.0)))
+    {
+      laddomat_on = true;
+      datalog[0xCE] |= (1 << 1);
+      sample_send |= 256;
+    }
+
+    if (check_dhw != dhw_ctc && check_dhw > 24 && check_dhw < 100)
+      set_ctc_temp(check_dhw);
+
+    if (solar_pump_force_on)
+    {
+      if (!(datalog[0xCE] & 4))
+      {
+        datalog[0xCE] |= (1 << 2);
+        sample_send |= 256;
+      }
+    }
+    else
+    {
+      if ((datalog[0xCE] & 4))
+      {
+        datalog[0xCE] &= ~(1 << 2);
+        sample_send |= 256;
+      }
+    }
+    if (solar_pump_force_off)
+    {
+      if (!(datalog[0xCE] & 8))
+      {
+        datalog[0xCE] |= (1 << 3);
+        sample_send |= 256;
+      }
+    }
+    else
+    {
+      if ((datalog[0xCE] & 8))
+      {
+        datalog[0xCE] &= ~(1 << 3);
+        sample_send |= 256;
+      }
+    }
+    if (laddomat_on)
+      PORTD |= (1 << PORTD6);     // Activate the laddomat relay
+    else
+      PORTD &= ~(1 << PORTD6);    // De-Activate the laddomat relay
+
+    if (solar_pump_on)
+    {
+      PORTB |= (1 << PORTB1);     // Activate the solarpump relay
+      latch_a = 1;
+      state = ~((latch_b << 1) | (latch_a << 0));
+      ds_write(state, DS2413);
+    }
+    else
+    {
+      PORTB &= ~(1 << PORTB1);    // De-Activate the solarpump relay
+      latch_a = 0;
+      state = ~((latch_b << 1) | (latch_a << 0));
+      ds_write(state, DS2413);
+    }
+
+    // Reset the watchdog timer
+    wdt_reset();
+
+    // Start the ADC oversampling
+    ADCSRA |= (1 << ADSC) | (1 << ADATE) | (1 << ADIE);
+
+    if (sample_send != 0)
+    {
+      new_sample = true;
       PORTD |= (1 << PORTD7);     // Set the Interrupt signal HIGH
+      interrupts();               // Should NOT need this, unless something is VERY wrong...
     }
   }
 } // end of loop
