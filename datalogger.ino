@@ -1,11 +1,11 @@
 /**
     I2C interface to SPI for CTC Ecologic EXT
-    ver 2.0.2
+    ver 2.0.3
 **/
 
 #define VER_MAJOR 2
 #define VER_MINOR 0
-#define VER_BUILD 2
+#define VER_BUILD 3
 
 #include <avr/pgmspace.h>
 #include <avr/wdt.h>
